@@ -2,6 +2,7 @@
 
 mod build;
 mod config;
+mod datastore;
 mod instance;
 mod link;
 mod matches;

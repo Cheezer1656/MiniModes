@@ -421,3 +421,249 @@ fn bind_to_close_runs_until_callbacks_return() {
     let mut idle = vm("print('hi')");
     assert!(step(&mut idle, 1, &[], vec![Event::Closing]).closed);
 }
+
+/// An in-memory DataStore backend, answering the way the shard does.
+#[derive(Default)]
+struct FakeData {
+    entries: std::collections::BTreeMap<(bool, String, String), crate::DataEntry>,
+    /// Writes another server sneaks in before the next conditional set.
+    interfere: u32,
+}
+
+impl FakeData {
+    fn serve(&mut self, command: &Command) -> Option<Event> {
+        use crate::{DataEntry, DataReply, DataRequest, DataValue};
+        let Command::Data { request, store, op } = command else {
+            return None;
+        };
+        let id = |key: &str| (store.ordered, store.name.clone(), key.to_owned());
+        let result = match op.clone() {
+            DataRequest::Get { key } => Ok(DataReply::Entry(self.entries.get(&id(&key)).cloned())),
+            DataRequest::Remove { key } => Ok(DataReply::Entry(self.entries.remove(&id(&key)))),
+            DataRequest::Set { key, value, expect } => {
+                if expect.is_some() && self.interfere > 0 {
+                    self.interfere -= 1;
+                    let e = self.entries.get_mut(&id(&key)).unwrap();
+                    e.version += 1;
+                    e.value = DataValue::Json(r#"{"n":100}"#.into());
+                }
+                let current = self.entries.get(&id(&key));
+                match expect {
+                    Some(v) if current.map(|e| e.version) != v => Ok(DataReply::Conflict(current.cloned())),
+                    _ => {
+                        let version = current.map_or(1, |e| e.version + 1);
+                        let entry = DataEntry { value, version };
+                        self.entries.insert(id(&key), entry.clone());
+                        Ok(DataReply::Written(entry))
+                    }
+                }
+            }
+            DataRequest::Increment { key, delta } => {
+                let current = self.entries.get(&id(&key));
+                let n = match current.map(|e| &e.value) {
+                    None => 0,
+                    Some(DataValue::Int(n)) => *n,
+                    Some(DataValue::Json(s)) => match s.parse::<f64>() {
+                        Ok(n) => n as i64,
+                        Err(_) => {
+                            return Some(Event::DataReply {
+                                request: *request,
+                                result: Err("not an integer".into()),
+                            });
+                        }
+                    },
+                };
+                let value = if store.ordered {
+                    DataValue::Int(n + delta)
+                } else {
+                    DataValue::Json((n + delta).to_string())
+                };
+                let entry = DataEntry {
+                    value,
+                    version: current.map_or(1, |e| e.version + 1),
+                };
+                self.entries.insert(id(&key), entry.clone());
+                Ok(DataReply::Written(entry))
+            }
+            DataRequest::Sorted {
+                ascending, limit, after, ..
+            } => {
+                let mut list: Vec<(String, i64)> = self
+                    .entries
+                    .iter()
+                    .filter(|((o, s, _), _)| *o && *s == store.name)
+                    .map(|((_, _, k), e)| match e.value {
+                        DataValue::Int(n) => (k.clone(), n),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                list.sort_by_key(|(k, v)| (*v, k.clone()));
+                if !ascending {
+                    list.reverse();
+                }
+                if let Some((v, k)) = after {
+                    let pos = list.iter().position(|e| *e == (k.clone(), v)).unwrap();
+                    list.drain(..=pos);
+                }
+                list.truncate(limit as usize);
+                Ok(DataReply::Sorted(list))
+            }
+        };
+        Some(Event::DataReply {
+            request: *request,
+            result,
+        })
+    }
+}
+
+/// Steps until the VM stops making requests, answering each one the next
+/// tick. Returns the printed lines.
+fn run_with_data(vm: &mut Vm, data: &mut FakeData, ticks: u64) -> Vec<String> {
+    let mut printed = Vec::new();
+    let mut events = Vec::new();
+    for tick in 0..ticks {
+        let out = step(vm, tick, &[], std::mem::take(&mut events));
+        printed.extend(messages(&out));
+        events = out.commands.iter().filter_map(|c| data.serve(c)).collect();
+    }
+    printed
+}
+
+#[test]
+fn datastores_store_plain_data() {
+    let mut vm = vm(r#"
+        local store = DataStoreService:GetDataStore("profiles")
+        print(store:GetAsync("p1"))
+        store:SetAsync("p1", { coins = 5, items = { "sword", "bow" }, name = "Ann", vip = true })
+        local p = store:GetAsync("p1")
+        print(p.coins, #p.items, p.items[2], p.name, p.vip)
+        print(store:IncrementAsync("visits"), store:IncrementAsync("visits", 4))
+        print(store:UpdateAsync("p1", function(old) old.coins += 1 return old end).coins)
+        print(store:UpdateAsync("p1", function() return nil end), store:GetAsync("p1").coins)
+        print(store:RemoveAsync("visits"), store:GetAsync("visits"))
+        print(pcall(store.SetAsync, store, "bad", { f = print }))
+        print(pcall(store.SetAsync, store, "bad", { 1, 2, x = 3 }))
+        print(pcall(store.SetAsync, store, "bad", 0/0))
+        print(pcall(store.GetAsync, store, string.rep("k", 51)))
+        print(pcall(store.IncrementAsync, store, "p1"))
+        print("done")
+    "#);
+    let mut data = FakeData::default();
+    let printed = run_with_data(&mut vm, &mut data, 30);
+    assert_eq!(printed[..6], ["nil", "5 2 bow Ann true", "1 5", "6", "nil 6", "5 nil"], "{printed:?}");
+    assert!(printed[6].starts_with("false") && printed[6].contains("can't store a function"), "{printed:?}");
+    assert!(printed[7].contains("mixes array items"), "{printed:?}");
+    assert!(printed[8].contains("NaN"), "{printed:?}");
+    assert!(printed[9].contains("1 to 50 bytes"), "{printed:?}");
+    assert_eq!(printed[11], "done", "{printed:?}");
+}
+
+#[test]
+fn update_async_retries_on_conflict() {
+    let mut vm = vm(r#"
+        local store = DataStoreService:GetDataStore("s")
+        store:SetAsync("k", { n = 1 })
+        local calls = 0
+        local new = store:UpdateAsync("k", function(old) calls += 1 old.n += 1 return old end)
+        print(new.n, calls)
+    "#);
+    let mut data = FakeData {
+        interfere: 1,
+        ..FakeData::default()
+    };
+    // The first try saw n = 1, but another server wrote n = 100 first.
+    assert_eq!(run_with_data(&mut vm, &mut data, 20), ["101 2"]);
+}
+
+#[test]
+fn ordered_stores_page_by_value() {
+    let mut vm = vm(r#"
+        local wins = DataStoreService:GetOrderedDataStore("wins")
+        for i, name in { "a", "b", "c", "d", "e" } do
+            wins:SetAsync(name, i * 10)
+        end
+        print(pcall(wins.SetAsync, wins, "x", 1.5))
+        local pages = wins:GetSortedAsync(false, 2)
+        while true do
+            local line = {}
+            for _, entry in pages:GetCurrentPage() do
+                table.insert(line, entry.key .. "=" .. entry.value)
+            end
+            print(table.concat(line, " "), pages.IsFinished)
+            if pages.IsFinished then break end
+            pages:AdvanceToNextPageAsync()
+        end
+        local plain = DataStoreService:GetDataStore("wins")
+        print(plain:GetAsync("a"), pcall(plain.GetSortedAsync, plain))
+    "#);
+    let mut data = FakeData::default();
+    let printed = run_with_data(&mut vm, &mut data, 40);
+    assert!(printed[0].contains("whole number"), "{printed:?}");
+    assert_eq!(printed[1..4], ["e=50 d=40 false", "c=30 b=20 false", "a=10 true"], "{printed:?}");
+    assert!(printed[4].starts_with("nil false") && printed[4].contains("ordered store"), "{printed:?}");
+}
+
+#[test]
+fn datastore_requests_are_rate_limited() {
+    let mut vm = vm_with(
+        &[(
+            "main.luau",
+            r#"
+            local store = DataStoreService:GetDataStore("s")
+            for i = 1, 4 do
+                task.spawn(store.SetAsync, store, "k" .. i, i)
+            end
+            local ok, err = pcall(store.GetAsync, store, "k")
+            print(ok, err)
+            "#,
+        )],
+        Limits {
+            data_requests_per_minute: 4,
+            ..limits()
+        },
+    );
+    let out = step(&mut vm, 0, &[], vec![]);
+    let printed = messages(&out);
+    assert!(printed[0].starts_with("false") && printed[0].contains("too many DataStore requests"), "{printed:?}");
+    assert_eq!(out.commands.iter().filter(|c| matches!(c, Command::Data { .. })).count(), 4);
+    // The budget refills over the minute: one more after 15 seconds.
+    let mut vm = vm_with(
+        &[(
+            "main.luau",
+            r#"
+            local s = DataStoreService:GetDataStore("s")
+            for i = 1, 4 do task.spawn(s.SetAsync, s, "k", i) end
+            task.wait(15)
+            task.spawn(s.GetAsync, s, "a")
+            task.spawn(s.GetAsync, s, "b")
+            "#,
+        )],
+        Limits {
+            data_requests_per_minute: 4,
+            ..limits()
+        },
+    );
+    step(&mut vm, 0, &[], vec![]);
+    let out = step(&mut vm, 300, &[], vec![]);
+    assert_eq!(out.commands.iter().filter(|c| matches!(c, Command::Data { .. })).count(), 1);
+    assert!(messages(&out)[0].contains("too many"), "{:?}", messages(&out));
+}
+
+#[test]
+fn close_waits_for_datastore_saves() {
+    let mut vm = vm(r#"
+        game:BindToClose(function()
+            DataStoreService:GetDataStore("s"):SetAsync("k", 1)
+            print("saved")
+        end)
+    "#);
+    step(&mut vm, 0, &[], vec![]);
+    let out = step(&mut vm, 1, &[], vec![Event::Closing]);
+    assert!(!out.closed);
+    let mut data = FakeData::default();
+    let replies: Vec<_> = out.commands.iter().filter_map(|c| data.serve(c)).collect();
+    assert_eq!(replies.len(), 1);
+    let out = step(&mut vm, 2, &[], replies);
+    assert_eq!(messages(&out), ["saved"]);
+    assert!(out.closed);
+}

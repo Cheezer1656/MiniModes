@@ -1,7 +1,8 @@
 //! The globals scripts see. Roblox-flavored: `game.Players`, `game.World`,
-//! `game.Rules`, `task`, `Vector3`, `Region`, `Item`, and `require` over the
-//! game's own module tree.
+//! `game.Rules`, `task`, `Vector3`, `Region`, `Item`, `DataStoreService`, and
+//! `require` over the game's own module tree.
 
+mod datastore;
 mod game;
 mod player;
 mod signal;
@@ -83,6 +84,7 @@ pub fn install(lua: &Lua, bundle: &Bundle) -> mlua::Result<()> {
 
     signal::install(lua)?;
     task::install(lua)?;
+    datastore::install(lua)?;
     vector::install(lua)?;
     let game = lua.create_table()?;
     self::game::install(lua, &game)?;
@@ -233,6 +235,7 @@ pub fn dispatch(lua: &Lua, event: Event) -> mlua::Result<()> {
         }
         Event::Match { phase, seconds, winners } => self::game::match_event(lua, phase, seconds, winners),
         Event::Closing => self::game::closing(lua),
+        Event::DataReply { request, result } => datastore::reply(lua, request, result),
         Event::BlockBroken { player, pos, old } => block_event(lua, player, pos, old, BlockState::AIR, false),
         Event::BlockPlaced { player, pos, old, new } => block_event(lua, player, pos, old, new, true),
     }

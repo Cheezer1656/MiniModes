@@ -58,6 +58,14 @@ pub struct ScriptSettings {
     pub max_fill_volume: u64,
     /// Script block writes applied per instance per tick.
     pub blocks_per_tick: usize,
+    /// What one game's DataStores may hold. Will come from the owner's rank.
+    pub datastore_quota_mb: i64,
+    /// Largest single DataStore value, as JSON.
+    pub datastore_value_kb: usize,
+    /// DataStore requests per instance per minute, plus `datastore_requests_per_player`
+    /// for each player in it.
+    pub datastore_requests_per_minute: u32,
+    pub datastore_requests_per_player: u32,
 }
 
 impl Default for ScriptSettings {
@@ -69,6 +77,10 @@ impl Default for ScriptSettings {
             max_overrun_ticks: limits.max_overrun_steps,
             max_fill_volume: limits.max_fill_volume,
             blocks_per_tick: 8192,
+            datastore_quota_mb: 16,
+            datastore_value_kb: limits.max_data_value >> 10,
+            datastore_requests_per_minute: limits.data_requests_per_minute,
+            datastore_requests_per_player: limits.data_requests_per_player,
         }
     }
 }
@@ -82,9 +94,13 @@ impl ScriptSettings {
                 slice: Duration::from_secs_f64(self.slice_ms.max(0.1) / 1000.0),
                 max_overrun_steps: self.max_overrun_ticks,
                 max_fill_volume: self.max_fill_volume,
+                max_data_value: self.datastore_value_kb << 10,
+                data_requests_per_minute: self.datastore_requests_per_minute,
+                data_requests_per_player: self.datastore_requests_per_player,
                 ..Limits::default()
             },
             blocks_per_tick: self.blocks_per_tick.max(1),
+            data_quota: self.datastore_quota_mb.max(0) << 20,
         }
     }
 }

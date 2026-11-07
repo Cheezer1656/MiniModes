@@ -1,7 +1,9 @@
 //! Postgres access shared by the lobby and shards. Queries are checked at
 //! runtime (no `DATABASE_URL` needed to build); migrations are embedded.
 
+pub mod datastore;
 pub mod editor;
+pub mod library;
 pub mod publish;
 
 use std::time::Duration;
@@ -76,6 +78,10 @@ pub struct GameRow {
     /// Open worlds: save each player's inventory and position (settings
     /// `save_player_state`, default on).
     pub save_player_state: bool,
+    pub rating_avg: Option<f64>,
+    pub rating_count: i64,
+    /// Distinct players who joined the published game.
+    pub play_count: i64,
 }
 
 impl GameRow {
@@ -95,7 +101,9 @@ impl GameRow {
             featured: false,
             published_at: self.published_unix.unwrap_or(self.created_unix),
             version: self.published_version.unwrap_or(0) as u32,
-            rating: None,
+            rating: self.rating_avg.map(|r| r as f32),
+            ratings: self.rating_count as u32,
+            plays: self.play_count as u32,
         }
     }
 }
@@ -103,7 +111,10 @@ impl GameRow {
 pub(crate) const GAME_COLUMNS: &str = "g.id, g.owner, p.username AS owner_name, g.name, g.description, g.icon, g.kind, \
      g.max_players, g.map_size, g.draft_map_hash, extract(epoch FROM g.created_at)::bigint AS created_unix, \
      g.published_version, extract(epoch FROM g.first_published_at)::bigint AS published_unix, \
-     COALESCE((g.settings->>'save_player_state')::boolean, true) AS save_player_state";
+     COALESCE((g.settings->>'save_player_state')::boolean, true) AS save_player_state, \
+     (SELECT avg(r.stars)::float8 FROM ratings r WHERE r.game = g.id) AS rating_avg, \
+     (SELECT count(*) FROM ratings r WHERE r.game = g.id) AS rating_count, \
+     (SELECT count(*) FROM plays pl WHERE pl.game = g.id) AS play_count";
 
 /// Records a login and returns the player's rank, if one was granted.
 pub async fn player_joined(pool: &PgPool, uuid: Uuid, username: &str) -> sqlx::Result<Option<String>> {

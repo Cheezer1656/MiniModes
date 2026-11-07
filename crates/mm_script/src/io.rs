@@ -14,6 +14,8 @@ use crate::rules::Rules;
 /// while the VM lives.
 pub type PlayerId = u32;
 pub type RegionId = u32;
+/// Numbers a VM's DataStore requests, so replies find their thread.
+pub type RequestId = u32;
 
 /// What scripts know about the game they run in (`game.GameId`, ...).
 #[derive(Clone, Debug)]
@@ -97,6 +99,60 @@ pub enum Event {
     Match { phase: MatchPhase, seconds: u32, winners: Vec<PlayerId> },
     /// The instance is shutting down: run `game:BindToClose` callbacks.
     Closing,
+    /// The answer to a [`Command::Data`]; `Err` is shown to the script.
+    DataReply { request: RequestId, result: Result<DataReply, String> },
+}
+
+/// Which DataStore a request targets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreRef {
+    pub name: String,
+    /// `GetOrderedDataStore`: integer values that can be listed in order.
+    pub ordered: bool,
+}
+
+/// A stored value: JSON in a regular store, an integer in an ordered one.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DataValue {
+    Json(String),
+    Int(i64),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DataEntry {
+    pub value: DataValue,
+    /// Bumped by every write; `UpdateAsync` writes only if it's unchanged.
+    pub version: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DataRequest {
+    Get { key: String },
+    /// With `expect`, write only if the entry's version is still that
+    /// (`None`: the entry is still missing).
+    Set { key: String, value: DataValue, expect: Option<Option<i64>> },
+    Increment { key: String, delta: i64 },
+    Remove { key: String },
+    /// Ordered stores: a page sorted by value, then key.
+    Sorted {
+        ascending: bool,
+        limit: u32,
+        min: Option<i64>,
+        max: Option<i64>,
+        /// The last `(value, key)` of the previous page.
+        after: Option<(i64, String)>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DataReply {
+    /// `Get`, and the old entry for `Remove`.
+    Entry(Option<DataEntry>),
+    /// A `Set` or `Increment` went through.
+    Written(DataEntry),
+    /// A conditional `Set` found this instead.
+    Conflict(Option<DataEntry>),
+    Sorted(Vec<(String, i64)>),
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +187,8 @@ pub enum Command {
     MatchSettings { min_players: u32, countdown: u32 },
     /// `game.Match:End(winners)`.
     EndMatch { winners: Vec<PlayerId> },
+    /// A DataStore call; the host answers with [`Event::DataReply`].
+    Data { request: RequestId, store: StoreRef, op: DataRequest },
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +214,12 @@ pub struct Limits {
     pub max_diagnostics: usize,
     /// Modules that may opt into native codegen with `--!native`.
     pub max_native_modules: usize,
+    /// Largest DataStore value, as JSON.
+    pub max_data_value: usize,
+    /// DataStore requests per minute: this much, plus `data_requests_per_player`
+    /// for each player in the instance.
+    pub data_requests_per_minute: u32,
+    pub data_requests_per_player: u32,
 }
 
 impl Default for Limits {
@@ -168,6 +232,9 @@ impl Default for Limits {
             max_commands: 10_000,
             max_diagnostics: 50,
             max_native_modules: 4,
+            max_data_value: 64 << 10,
+            data_requests_per_minute: 60,
+            data_requests_per_player: 10,
         }
     }
 }

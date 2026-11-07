@@ -23,3 +23,8 @@ slice_ms = 2.0
 max_overrun_ticks = 100
 max_fill_volume = 262144
 blocks_per_tick = 8192
+# Per game; drafts get as much again for their own data.
+datastore_quota_mb = 16
+datastore_value_kb = 64
+datastore_requests_per_minute = 60
+datastore_requests_per_player = 10

@@ -229,12 +229,21 @@ impl Bot {
 
     /// Clicks `slot` of the open window (`button` 0 = left, 1 = right).
     pub async fn click(&mut self, slot: i16, button: i8) -> anyhow::Result<()> {
+        self.click_mode(slot, button, ClickMode::Click).await
+    }
+
+    /// Shift-clicks `slot` of the open window.
+    pub async fn shift_click(&mut self, slot: i16) -> anyhow::Result<()> {
+        self.click_mode(slot, 0, ClickMode::ShiftClick).await
+    }
+
+    async fn click_mode(&mut self, slot: i16, button: i8, mode: ClickMode) -> anyhow::Result<()> {
         self.enc.append_packet(&play::ContainerClickC2s {
             window_id: VarInt(self.window_id),
             state_id: VarInt(self.state_id),
             slot_idx: slot,
             button,
-            mode: ClickMode::Click,
+            mode,
             slot_changes: Bounded(Cow::Borrowed(&[])),
             carried_item: HashedItemStack::EMPTY,
         })?;
@@ -519,14 +528,24 @@ fn velocity_player_info(secret: &str, name: &str) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// The custom (or item) name of a stack, with legacy formatting codes.
+/// The custom (or item) name of a stack, then a line per lore line, with
+/// legacy formatting codes.
 fn item_name(stack: &ItemStack) -> String {
-    stack
-        .components()
-        .into_iter()
+    let components = stack.components();
+    let mut text = components
+        .iter()
         .find_map(|c| match c {
             ItemComponent::CustomName(t) | ItemComponent::ItemName(t) => Some(t.text.to_legacy_lossy()),
             _ => None,
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for c in &components {
+        if let ItemComponent::Lore(lines) = c {
+            for line in lines {
+                text.push('\n');
+                text.push_str(&line.text.to_legacy_lossy());
+            }
+        }
+    }
+    text
 }

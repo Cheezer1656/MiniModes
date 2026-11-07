@@ -4,6 +4,7 @@ mod chat;
 mod config;
 mod coordinator;
 mod join;
+mod library;
 mod menus;
 mod publish;
 mod ui;
@@ -62,6 +63,7 @@ fn main() -> anyhow::Result<()> {
             ui::LobbyUiPlugin,
             chat::ChatPlugin,
             join::JoinPlugin,
+            library::LibraryPlugin,
             publish::PublishPlugin,
             web::WebPlugin { config: web },
         ))

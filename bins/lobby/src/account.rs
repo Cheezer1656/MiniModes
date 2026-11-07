@@ -70,6 +70,7 @@ enum DbEvent {
         owned: Vec<GameSummary>,
         shared: Vec<GameSummary>,
         player_saves: HashSet<GameId>,
+        library: mm_db::library::Library,
     },
     Created {
         client: Entity,
@@ -115,11 +116,13 @@ fn load_accounts(
                 let rank = mm_db::player_joined(&pool, uuid, &name).await?;
                 let owned = mm_db::owned_games(&pool, uuid).await?;
                 let shared = mm_db::editor::shared_games(&pool, uuid).await?;
-                Ok::<_, sqlx::Error>((rank, owned, shared))
+                let library = mm_db::library::library(&pool, uuid).await?;
+                Ok::<_, sqlx::Error>((rank, owned, shared, library))
             }
             .await;
             let _ = tx.send(match result {
-                Ok((rank, owned, shared)) => DbEvent::Loaded {
+                Ok((rank, owned, shared, library)) => DbEvent::Loaded {
+                    library,
                     client,
                     rank,
                     player_saves: owned.iter().filter(|g| g.save_player_state).map(|g| GameId(g.id)).collect(),
@@ -195,8 +198,13 @@ fn apply_db_events(mut events: ResMut<DbEvents>, mut players: Query<(&mut Client
                 owned,
                 shared,
                 player_saves,
+                library,
             } => {
                 if let Ok((_, mut games)) = players.get_mut(client) {
+                    // A refresh keeps what changed since the first load.
+                    if !games.loaded {
+                        games.set_library(library);
+                    }
                     games.rank = rank;
                     games.player_saves = player_saves;
                     games.owned = owned;

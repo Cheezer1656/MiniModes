@@ -9,6 +9,7 @@ chunkedge.workspace = true
 mlua.workspace = true
 mm_proto.workspace = true
 mm_world.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

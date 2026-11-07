@@ -176,6 +176,57 @@ declare game: {
 	Rules: Rules,
 }
 
+-- Values are plain data: nil, booleans, numbers, strings, and tables of
+-- those (arrays, or tables with string keys). Every `...Async` call yields
+-- until the database answers, and raises an error if it fails, so wrap
+-- important saves in `pcall`. A game may make 60 requests a minute plus 10
+-- per player. Drafts have their own data, apart from the published game's.
+export type DataStore = {
+	Name: string,
+	GetAsync: (self: DataStore, key: string) -> any,
+	SetAsync: (self: DataStore, key: string, value: any) -> (),
+	-- `transform` gets the current value (nil if unset) and returns the new
+	-- one, or nil to leave it unchanged. If another server writes the key
+	-- meanwhile, `transform` runs again on the newer value.
+	UpdateAsync: (self: DataStore, key: string, transform: (any) -> any) -> any,
+	-- Adds `delta` (default 1) to a whole number and returns the result.
+	IncrementAsync: (self: DataStore, key: string, delta: number?) -> number,
+	-- Returns the value that was removed.
+	RemoveAsync: (self: DataStore, key: string) -> any,
+}
+
+export type DataStoreEntry = { key: string, value: number }
+
+export type DataStorePages = {
+	IsFinished: boolean,
+	GetCurrentPage: (self: DataStorePages) -> { DataStoreEntry },
+	AdvanceToNextPageAsync: (self: DataStorePages) -> (),
+}
+
+-- Ordered stores hold whole numbers and list them in order (leaderboards).
+export type OrderedDataStore = {
+	Name: string,
+	GetAsync: (self: OrderedDataStore, key: string) -> number?,
+	SetAsync: (self: OrderedDataStore, key: string, value: number) -> (),
+	UpdateAsync: (self: OrderedDataStore, key: string, transform: (number?) -> number?) -> number?,
+	IncrementAsync: (self: OrderedDataStore, key: string, delta: number?) -> number,
+	RemoveAsync: (self: OrderedDataStore, key: string) -> number?,
+	-- Sorted by value, then key. `pageSize` is 1-100 (default 50).
+	GetSortedAsync: (
+		self: OrderedDataStore,
+		ascending: boolean,
+		pageSize: number?,
+		minValue: number?,
+		maxValue: number?
+	) -> DataStorePages,
+}
+
+declare DataStoreService: {
+	-- Names and keys are 1 to 50 bytes.
+	GetDataStore: (self: any, name: string) -> DataStore,
+	GetOrderedDataStore: (self: any, name: string) -> OrderedDataStore,
+}
+
 declare task: {
 	spawn: <A...>(f: ((A...) -> ()) | thread, A...) -> thread,
 	defer: <A...>(f: ((A...) -> ()) | thread, A...) -> thread,

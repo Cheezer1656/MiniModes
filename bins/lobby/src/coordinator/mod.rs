@@ -63,6 +63,8 @@ struct PendingJoin {
     /// For one automatic retry if the shard refuses (e.g. the match just
     /// started, before its heartbeat said so).
     retry: Option<(mm_proto::GameSummary, GameVersion)>,
+    /// Building in the draft rather than playing.
+    draft: bool,
     shard: ShardId,
     instance: InstanceId,
     deadline: Instant,
@@ -283,6 +285,7 @@ impl Coordinator {
                 uuid,
                 game: game.id,
                 retry: Some((game.clone(), version)),
+                draft: version == GameVersion::Draft,
                 shard: shard_id,
                 instance,
                 deadline: Instant::now() + HANDOFF_TIMEOUT,
@@ -395,6 +398,7 @@ fn pump_network(
     mut clients: LobbyClients,
     tokio: Res<Tokio>,
     console: Res<crate::web::Console>,
+    mut played: MessageWriter<crate::library::Played>,
 ) {
     let coordinator = &mut *coordinator;
     let mut changed = false;
@@ -481,7 +485,7 @@ fn pump_network(
                             }
                             continue;
                         }
-                        let (client, game, instance) = (pending.client, pending.game, pending.instance);
+                        let (client, game, instance, draft) = (pending.client, pending.game, pending.instance, pending.draft);
                         let Ok((_, uuid, mut games)) = clients.get_mut(client) else {
                             coordinator.release(ticket);
                             continue;
@@ -491,7 +495,10 @@ fn pump_network(
                             i.reserved = i.reserved.saturating_sub(1);
                             i.status.expected += 1;
                         }
-                        games.played(game);
+                        if !draft {
+                            games.played(game);
+                            played.write(crate::library::Played { client, uuid: uuid.0, game });
+                        }
                         let pending = coordinator.pending.get_mut(&ticket).expect("checked above");
                         pending.connecting = true;
                         pending.deadline = Instant::now() + HANDOFF_TIMEOUT;

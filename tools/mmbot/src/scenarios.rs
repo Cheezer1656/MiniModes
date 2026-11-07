@@ -1098,3 +1098,142 @@ pub async fn games(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result<(
     println!("games scenario passed");
     Ok(())
 }
+
+const DATA_SCRIPT: &str = r#"
+local visits = DataStoreService:GetDataStore("visits")
+local profiles = DataStoreService:GetDataStore("profiles")
+local board = DataStoreService:GetOrderedDataStore("board")
+game.Players.PlayerAdded:Connect(function(player)
+    local n = visits:IncrementAsync(player.UserId)
+    player:SendMessage("visit " .. n .. " draft=" .. tostring(game.IsDraft))
+    player.Chatted:Connect(function(message)
+        if message == "save" then
+            profiles:SetAsync(player.UserId, { name = player.Name, coins = 7, tags = { "a", "b" } })
+            player:SendMessage("saved")
+        elseif message == "load" then
+            local p = profiles:UpdateAsync(player.UserId, function(old)
+                old.coins += 1
+                return old
+            end)
+            player:SendMessage("loaded " .. p.name .. " coins=" .. p.coins .. " tags=" .. #p.tags)
+        elseif message == "board" then
+            board:SetAsync("x", 5)
+            board:SetAsync("y", 50)
+            board:IncrementAsync(player.Name, 20)
+            local pages = board:GetSortedAsync(false, 2)
+            local parts = {}
+            for _, entry in pages:GetCurrentPage() do
+                table.insert(parts, entry.key .. "=" .. entry.value)
+            end
+            player:SendMessage("top " .. table.concat(parts, ",") .. " more=" .. tostring(not pages.IsFinished))
+        elseif message == "bad" then
+            local ok, err = pcall(profiles.SetAsync, profiles, "k", { f = print })
+            player:SendMessage("bad " .. tostring(ok) .. " " .. tostring(err))
+        end
+    end)
+end)
+"#;
+
+/// Opens the Game Browser and returns the slot and text of `game`'s icon.
+async fn find_in_browser(bot: &mut Bot, game: &str) -> anyhow::Result<(i16, String)> {
+    bot.select_hotbar(0).await?;
+    bot.use_item().await?;
+    let items = expect_menu(bot, "Game Browser").await?;
+    let idx = items
+        .iter()
+        .position(|i| i.contains(game))
+        .with_context(|| format!("{game} not listed: {items:?}"))?;
+    Ok((idx as i16, items[idx].clone()))
+}
+
+/// DataStores and the browser's saved data: a published game's scripts keep
+/// data in Postgres across visits (apart from the draft's), a returning
+/// player is asked to rate the game, and ratings, favorites, recent games
+/// and search survive a reconnect. Needs the lobby, a gamehost and Postgres.
+pub async fn data(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result<()> {
+    let secret = std::env::var("MINIMODES_VELOCITY_SECRET").context("MINIMODES_VELOCITY_SECRET must be set")?;
+    let db = mm_db::connect(&mm_db::url_from_env()?, 2).await?;
+    let mut gate = mock_gate::start(gate_bind, lobby).await?;
+    wait_for_network(&gate, lobby).await?;
+    let pid = std::process::id() % 100_000;
+    let (owner, game, p) = (format!("d{pid}"), format!("Vault {pid}"), format!("dp{pid}"));
+
+    let mut owner_bot = create_kind(lobby, &owner, &game, &secret, OPEN_WORLD).await?;
+    let owned = mm_db::owned_games(&db, bot_uuid(&owner)).await?;
+    let id = owned.iter().find(|g| g.name == game).context("created game not in the database")?.id;
+    mm_db::put_draft_file(&db, id, "main.luau", DATA_SCRIPT, None).await?;
+    publish_game(&mut owner_bot, &game, None).await?;
+
+    println!("== DataStores in the published game");
+    let lobby_p = lobby_bot(lobby, &p, &secret).await?;
+    let mut player = play(&mut gate, lobby_p, &p, &game, &secret).await?;
+    expect_chat(&mut player, "visit 1 draft=false").await?;
+    player.chat("save").await?;
+    expect_chat(&mut player, "saved").await?;
+    player.chat("load").await?;
+    expect_chat(&mut player, &format!("loaded {p} coins=8 tags=2")).await?;
+    player.chat("board").await?;
+    expect_chat(&mut player, &format!("top y=50,{p}=20 more=true")).await?;
+    player.chat("bad").await?;
+    expect_chat(&mut player, "can't store a function").await?;
+    let visits = mm_db::datastore::Store {
+        game: id,
+        draft: false,
+        ordered: false,
+        name: "visits",
+    };
+    let uuid = bot_uuid(&p).hyphenated().to_string();
+    let stored = mm_db::datastore::get(&db, visits, &uuid).await?.context("visit count not saved")?;
+    anyhow::ensure!(stored.value == mm_db::datastore::Value::Json("1".into()), "stored {stored:?}");
+
+    println!("== back in the lobby: rate it");
+    let mut lobby_p = to_lobby(&mut gate, player, &p, &secret).await?;
+    expect_chat(&mut lobby_p, "How was").await?;
+    lobby_p.command(&format!("rate {id} 4")).await?;
+    expect_chat(&mut lobby_p, "You rated").await?;
+    let (idx, icon) = find_in_browser(&mut lobby_p, &game).await?;
+    anyhow::ensure!(icon.contains("★ 4.0") && icon.contains("(1 rating)"), "rating not shown: {icon}");
+
+    println!("favorite it, then check the details menu");
+    lobby_p.click(idx, 1).await?;
+    let items = expect_menu(&mut lobby_p, "Game Browser").await?;
+    anyhow::ensure!(slot(&items, idx as usize).contains("★\n"), "not marked favorite: {}", slot(&items, idx as usize));
+    lobby_p.shift_click(idx).await?;
+    let info = expect_menu(&mut lobby_p, &game).await?;
+    anyhow::ensure!(slot(&info, 4).contains("1 player so far"), "details: {}", slot(&info, 4));
+    anyhow::ensure!(slot(&info, 24).contains("Favorite"), "favorite button: {}", slot(&info, 24));
+    anyhow::ensure!(slot(&info, 32).contains("Your rating"), "4th star: {}", slot(&info, 32));
+    lobby_p.click(33, 0).await?;
+    expect_chat(&mut lobby_p, "You rated").await?;
+    let info = expect_menu(&mut lobby_p, &game).await?;
+    anyhow::ensure!(slot(&info, 4).contains("★ 5.0"), "re-rating not shown: {}", slot(&info, 4));
+
+    println!("reconnect: favorites, recent and search come back from the database");
+    drop(lobby_p);
+    let mut lobby_p = lobby_bot(lobby, &p, &secret).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (_, icon) = find_in_browser(&mut lobby_p, &game).await?;
+    anyhow::ensure!(icon.contains("★ 5.0"), "rating lost: {icon}");
+    lobby_p.click(50, 0).await?;
+    let favorites = expect_menu(&mut lobby_p, "Favorites").await?;
+    anyhow::ensure!(favorites.iter().any(|i| i.contains(&game)), "favorite lost: {favorites:?}");
+    lobby_p.click(5, 0).await?;
+    let recent = expect_menu(&mut lobby_p, "Recently Played").await?;
+    anyhow::ensure!(recent.iter().any(|i| i.contains(&game)), "recent lost: {recent:?}");
+    lobby_p.select_hotbar(8).await?;
+    lobby_p.use_item().await?;
+    expect_chat(&mut lobby_p, "Type a game").await?;
+    lobby_p.chat(&format!("vault {pid}")).await?;
+    let results = expect_menu(&mut lobby_p, "Search Results").await?;
+    anyhow::ensure!(slot(&results, 10).contains(&game), "search: {results:?}");
+
+    println!("== the second visit reads the saved count; the draft has its own data");
+    let mut player = play(&mut gate, lobby_p, &p, &game, &secret).await?;
+    expect_chat(&mut player, "visit 2 draft=false").await?;
+    drop(player);
+    let mut builder = open_draft(&mut gate, owner_bot, &owner, &game, &secret).await?;
+    expect_chat(&mut builder, "visit 1 draft=true").await?;
+
+    println!("data scenario passed");
+    Ok(())
+}

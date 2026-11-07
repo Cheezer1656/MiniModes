@@ -34,8 +34,13 @@ pub enum LobbyAction {
     SearchResults { query: Arc<str>, page: usize },
     /// Prompt the player to type a search query in chat.
     StartSearch,
-    /// Left click plays, right click toggles favorite.
+    /// Left click plays, right click toggles favorite, shift-click shows
+    /// the game's details.
     Game(GameId),
+    /// A game's description, favorite toggle and rating.
+    GameInfo(GameId),
+    ToggleFavorite(GameId),
+    Rate { game: GameId, stars: u8 },
     /// Join one of your own games' draft to build (right click: manage it).
     EditDraft(GameId),
     /// Build, publish, settings and play for one of your games.
@@ -75,6 +80,7 @@ pub fn render(
         LobbyAction::CreateKind(kind) => create_icon(*kind),
         LobbyAction::Favorites { recent, page } => favorites(catalog, player, *recent, *page),
         LobbyAction::SearchResults { query, page } => search_results(catalog, player, query, *page),
+        LobbyAction::GameInfo(id) => game_info(catalog, player, catalog.get(*id)?),
         _ => return None,
     })
 }
@@ -399,10 +405,7 @@ fn game_icon(catalog: &GameCatalog, player: &PlayerGames, game: &GameSummary) ->
         ),
         GameKind::OpenWorld { .. } => format!("§7Open world §8· §a{} online", live.players),
     }));
-    lore.push(Text::text(match game.rating {
-        Some(r) => format!("§6★ {r:.1}"),
-        None => "§8Not rated yet".to_owned(),
-    }));
+    lore.push(Text::text(rating_line(game)));
     lore.push(Text::default());
     lore.push(Text::text("§eClick to play"));
     lore.push(Text::text(if favorite {
@@ -410,6 +413,7 @@ fn game_icon(catalog: &GameCatalog, player: &PlayerGames, game: &GameSummary) ->
     } else {
         "§7Right-click to favorite"
     }));
+    lore.push(Text::text("§7Shift-click for details and rating"));
 
     let kind = ItemKind::from_str(&game.icon).unwrap_or(ItemKind::Paper);
     let name = if favorite {
@@ -422,6 +426,77 @@ fn game_icon(catalog: &GameCatalog, player: &PlayerGames, game: &GameSummary) ->
         item.insert_component(ItemComponent::EnchantmentGlintOverride(true));
     }
     item
+}
+
+fn rating_line(game: &GameSummary) -> String {
+    match game.rating {
+        Some(r) => format!(
+            "§6★ {r:.1} §8({} rating{})",
+            game.ratings,
+            if game.ratings == 1 { "" } else { "s" }
+        ),
+        None => "§8Not rated yet".to_owned(),
+    }
+}
+
+const INFO_STARS: [u16; 5] = [29, 30, 31, 32, 33];
+
+fn game_info(catalog: &GameCatalog, player: &PlayerGames, game: &GameSummary) -> Menu<LobbyAction> {
+    let mut menu = Menu::new(game.name.clone(), 5);
+    let kind = ItemKind::from_str(&game.icon).unwrap_or(ItemKind::Paper);
+    let live = catalog.live(game.id);
+    let mut lore = vec![Text::text(format!("§7by §f{}", game.creator))];
+    lore.extend(wrap(&game.description, 36).into_iter().take(8).map(|l| Text::text(format!("§8{l}"))));
+    lore.push(Text::default());
+    lore.push(Text::text(format!("§7{} §8· §fv{}", kind_label(game.kind), game.version)));
+    lore.push(Text::text(match game.kind {
+        GameKind::Match => format!("§a{} waiting §8· §e{} in progress", live.waiting, live.in_progress),
+        GameKind::OpenWorld { .. } => format!("§a{} online", live.players),
+    }));
+    lore.push(Text::text(format!(
+        "§7{} player{} so far",
+        game.plays,
+        if game.plays == 1 { "" } else { "s" }
+    )));
+    lore.push(Text::text(rating_line(game)));
+    menu.item(4, icon(kind, format!("§a{}", game.name), lore));
+
+    menu.button(20, icon(ItemKind::Emerald, "§aPlay", []), LobbyAction::Game(game.id));
+    let favorite = player.is_favorite(game.id);
+    let mut star = icon(
+        ItemKind::NetherStar,
+        if favorite { "§e★ Favorite" } else { "§7Add to favorites" },
+        [Text::text(if favorite { "§7Click to remove" } else { "§7Click to add" })],
+    );
+    star.insert_component(ItemComponent::EnchantmentGlintOverride(favorite));
+    menu.button(24, star, LobbyAction::ToggleFavorite(game.id));
+
+    let mine = player.ratings.get(&game.id).copied();
+    let played = player.played.contains(&game.id);
+    for (n, slot) in (1..=5u8).zip(INFO_STARS) {
+        let lit = mine.is_some_and(|m| n <= m);
+        let item = if lit { ItemKind::Sunflower } else { ItemKind::GrayDye };
+        let name = format!("§6{}§8{}", "★".repeat(n.into()), "★".repeat(5 - usize::from(n)));
+        if played {
+            let hint = match mine {
+                Some(m) if m == n => "§7Your rating".to_owned(),
+                _ => format!("§eClick to rate {n}/5"),
+            };
+            menu.button(slot, icon(item, name, [Text::text(hint)]), LobbyAction::Rate { game: game.id, stars: n });
+        } else {
+            menu.item(slot, icon(item, name, [Text::text("§7Play it to rate it")]));
+        }
+    }
+    menu.button(
+        40,
+        icon(ItemKind::Compass, "§aBack to Game Browser", []),
+        LobbyAction::Browser {
+            tab: BrowserTab::Popular,
+            page: 0,
+        },
+    );
+    menu.fill_empty_where(&icon(ItemKind::GrayStainedGlassPane, " ", []), |_| true);
+    menu
 }
 
 fn back_to_browser(menu: &mut Menu<LobbyAction>) {

@@ -9,7 +9,7 @@ use mlua::{AnyUserData, Function, IntoLuaMulti, Lua, MultiValue, Thread};
 use mm_proto::ipc::DiagnosticLevel;
 use mm_world::{BlockMirror, Bounds};
 
-use crate::io::{Command, Diagnostic, GameInfo, Limits, MatchPhase, PlayerId, PlayerSnap, RegionId};
+use crate::io::{Command, Diagnostic, GameInfo, Limits, MatchPhase, PlayerId, PlayerSnap, RegionId, RequestId};
 use crate::rules::Rules;
 
 pub(crate) const TICKS_PER_SECOND: f64 = 20.0;
@@ -48,7 +48,51 @@ pub(crate) struct Host {
     pub close_handlers: Vec<Function>,
     /// Threads running them, once the instance started closing.
     pub closing: Option<Vec<Thread>>,
+    pub data: DataRequests,
     rng: u64,
+}
+
+/// DataStore calls waiting for the host, and their rate limit.
+#[derive(Default)]
+pub(crate) struct DataRequests {
+    pub next: RequestId,
+    pub waiting: HashMap<RequestId, (Thread, DataOp)>,
+    /// Requests that may be made right now; refills every tick.
+    pub tokens: f64,
+    pub refilled_at: u64,
+    started: bool,
+}
+
+/// What a waiting thread expects back, which decides how the reply is
+/// turned into Lua values.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DataOp {
+    Get,
+    Set,
+    CompareSet,
+    Increment,
+    Remove,
+    Sorted,
+}
+
+impl DataRequests {
+    /// Takes one request from the per-minute budget. Returns the budget
+    /// when it's used up.
+    pub fn take(&mut self, tick: u64, per_minute: f64) -> Result<(), u32> {
+        if !self.started {
+            self.started = true;
+            self.tokens = per_minute;
+        } else {
+            let ticks = tick.saturating_sub(self.refilled_at) as f64;
+            self.tokens = (self.tokens + ticks * per_minute / (60.0 * TICKS_PER_SECOND)).min(per_minute);
+        }
+        self.refilled_at = tick;
+        if self.tokens < 1.0 {
+            return Err(per_minute as u32);
+        }
+        self.tokens -= 1.0;
+        Ok(())
+    }
 }
 
 /// The match as scripts see it; the host owns the real state.
@@ -121,6 +165,7 @@ impl Host {
             matches,
             close_handlers: Vec::new(),
             closing: None,
+            data: DataRequests::default(),
             rng: 0x9e37_79b9_7f4a_7c15,
         }
     }
@@ -353,7 +398,7 @@ impl Sched {
 
     /// Like `push`, for a thread parked on a signal: skipped if it was
     /// cancelled or rescheduled since.
-    fn wake(&mut self, thread: Thread, resume: Resume) {
+    pub fn wake(&mut self, thread: Thread, resume: Resume) {
         if self.live.contains_key(&thread_key(&thread)) {
             self.push(thread, resume);
         }

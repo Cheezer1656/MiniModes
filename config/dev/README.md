@@ -113,3 +113,24 @@ Then it publishes a persistent world and checks:
 - the player's inventory and position surviving an idle unload, plus
   `LastShutdown`;
 - a full reset, with its backup.
+
+## DataStores and browser data
+
+Scripts keep data across instances with `DataStoreService` (`GetDataStore`,
+`GetOrderedDataStore`; see the type definitions). Values are stored as JSON
+in Postgres per game, and a draft's data is kept apart from the published
+game's. The shard's `[scripts]` settings cap each game's storage
+(`datastore_quota_mb`), single values (`datastore_value_kb`) and the request
+rate (`datastore_requests_per_minute` plus `datastore_requests_per_player`
+for each player).
+
+The lobby saves favorites (right-click a game), plays and ratings. A
+player coming back from a game they haven't rated gets a clickable ★
+prompt (`/rate <1-5>` rates the last game played). Shift-click a game for
+its details, favorite toggle and star rating. Top Rated weighs the number of
+ratings, and search matches every word against names, creators and
+descriptions.
+
+`mmbot data` (same setup as `drafts`) covers both: script data across
+visits and in the draft, rating, favorites, recent games and search after a
+reconnect.

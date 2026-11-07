@@ -2453,6 +2453,7 @@ dependencies = [
  "mlua",
  "mm_proto",
  "mm_world",
+ "serde_json",
 ]
 
 [[package]]

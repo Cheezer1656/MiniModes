@@ -42,6 +42,10 @@ pub struct GameSummary {
     pub version: u32,
     /// Mean rating out of 5, if anyone rated it.
     pub rating: Option<f32>,
+    /// How many players rated it.
+    pub ratings: u32,
+    /// Distinct players who ever joined it.
+    pub plays: u32,
 }
 
 /// How a publish reaches a persistent world that already exists. Other

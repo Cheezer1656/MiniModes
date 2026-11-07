@@ -54,6 +54,8 @@ pub struct ScriptConfig {
     pub limits: Limits,
     /// Script block writes applied per instance per tick; the rest wait.
     pub blocks_per_tick: usize,
+    /// Bytes a game's DataStores may hold (drafts get as much again).
+    pub data_quota: i64,
 }
 
 /// The rules scripts set, enforced by the build systems. Present on every
@@ -87,6 +89,8 @@ pub struct ScriptHost {
     close_sent: bool,
     /// The VM reported every `BindToClose` callback done.
     closed: bool,
+    /// DataStore requests for the instance's worker.
+    data_requests: Vec<(mm_script::RequestId, mm_script::StoreRef, mm_script::DataRequest)>,
 }
 
 impl ScriptHost {
@@ -103,6 +107,7 @@ impl ScriptHost {
             next_timer: None,
             close_sent: false,
             closed: false,
+            data_requests: Vec::new(),
         }
     }
 
@@ -124,6 +129,10 @@ impl ScriptHost {
         if let Some(&id) = self.ids.get(&player) {
             self.inbox.push(event(id));
         }
+    }
+
+    pub fn take_data_requests(&mut self) -> Vec<(mm_script::RequestId, mm_script::StoreRef, mm_script::DataRequest)> {
+        std::mem::take(&mut self.data_requests)
     }
 
     /// The map changed in ways the VM didn't see (e.g. WorldEdit).
@@ -174,7 +183,7 @@ struct Loads {
 
 /// Bumped on every (re)load, so a slow stale load is ignored.
 #[derive(Component)]
-struct ScriptGeneration(u64);
+pub struct ScriptGeneration(pub u64);
 
 /// Rate limit on lines sent to the editor console.
 #[derive(Component, Default)]
@@ -213,6 +222,7 @@ impl Plugin for ScriptPlugin {
     fn build(&self, app: &mut App) {
         let (tx, rx) = mpsc::unbounded_channel();
         app.insert_resource(Loads { tx, rx })
+            .init_resource::<crate::datastore::DataReplies>()
             .add_message::<ReloadDraft>()
             .add_message::<RestartScripts>()
             .add_systems(
@@ -227,6 +237,8 @@ impl Plugin for ScriptPlugin {
                     apply_pending_blocks,
                     track_members,
                     respawn,
+                    crate::datastore::forward_requests,
+                    crate::datastore::deliver_replies,
                 )
                     .chain()
                     .in_set(ScriptSet::Apply),
@@ -656,6 +668,7 @@ fn apply_command(
             }
         }
         Command::SetRules { region, rules: r } => rules.0.set(region, r),
+        Command::Data { request, store, op } => host.data_requests.push((request, store, op)),
         Command::RemoveRegion(id) => {
             rules.0.regions.remove(&id);
         }

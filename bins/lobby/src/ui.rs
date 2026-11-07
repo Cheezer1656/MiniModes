@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use chunkedge::UniqueId;
 use chunkedge::prelude::*;
 use mm_ui::{
     Hotbar, HotbarSlot, MenuCommandsExt, NpcAction, NpcSpec, NpcTeam, UiAction, UiInputSet,
@@ -12,6 +13,7 @@ use crate::catalog::{BrowserTab, GameCatalog, PlayerGames};
 use crate::chat::{ChatPrompt, PromptPurpose};
 use crate::config::{HotbarConfig, MenuName, NpcConfig};
 use crate::join::JoinRequest;
+use crate::library::{FavoriteChanged, RateRequest};
 use crate::menus::{self, LobbyAction};
 use crate::publish::{PlayerSavesSetting, PublishRequest};
 use crate::world::LobbyLayer;
@@ -25,7 +27,7 @@ pub struct LobbyUiConfig {
 /// The view a player's open menu was rendered from, so it can be re-rendered
 /// after a change (e.g. toggling a favorite).
 #[derive(Component)]
-struct CurrentView(LobbyAction);
+pub struct CurrentView(pub LobbyAction);
 
 pub struct LobbyUiPlugin;
 
@@ -96,15 +98,17 @@ fn give_hotbar(mut commands: Commands, clients: Query<Entity, Added<Client>>, co
 fn handle_actions(
     mut commands: Commands,
     mut actions: MessageReader<UiAction<LobbyAction>>,
-    mut players: Query<(&mut Client, &mut PlayerGames, Option<&CurrentView>)>,
+    mut players: Query<(&mut Client, &UniqueId, &mut PlayerGames, Option<&CurrentView>)>,
     catalog: Res<GameCatalog>,
     server: Res<Server>,
     mut joins: MessageWriter<JoinRequest>,
     mut publishes: MessageWriter<PublishRequest>,
     mut settings: MessageWriter<PlayerSavesSetting>,
+    mut favorites: MessageWriter<FavoriteChanged>,
+    mut rates: MessageWriter<RateRequest>,
 ) {
     for UiAction { client: player, action, source } in actions.read() {
-        let Ok((mut client, mut games, view)) = players.get_mut(*player) else {
+        let Ok((mut client, uuid, mut games, view)) = players.get_mut(*player) else {
             continue;
         };
 
@@ -173,10 +177,33 @@ fn handle_actions(
                 });
                 continue;
             }
+            LobbyAction::Game(id) if matches!(source, UiSource::Menu { shift: true, .. }) => LobbyAction::GameInfo(*id),
+            LobbyAction::ToggleFavorite(id) => {
+                let on = games.toggle_favorite(*id);
+                favorites.write(FavoriteChanged {
+                    uuid: uuid.0,
+                    game: *id,
+                    on,
+                });
+                LobbyAction::GameInfo(*id)
+            }
+            LobbyAction::Rate { game, stars } => {
+                rates.write(RateRequest {
+                    client: *player,
+                    game: *game,
+                    stars: *stars,
+                });
+                continue;
+            }
             LobbyAction::Game(id) => {
                 let right_click = matches!(source, UiSource::Menu { button: 1, .. });
                 if right_click {
                     let now_favorite = games.toggle_favorite(*id);
+                    favorites.write(FavoriteChanged {
+                        uuid: uuid.0,
+                        game: *id,
+                        on: now_favorite,
+                    });
                     let name = catalog.get(*id).map_or("that game", |g| g.name.as_str());
                     client.send_action_bar_message(if now_favorite {
                         format!("§e★ Added {name} to favorites")

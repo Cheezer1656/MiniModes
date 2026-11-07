@@ -1,0 +1,26 @@
+[Unit]
+Description=Minimodes game host shard %i
+After=network-online.target minimodes-gate.service
+PartOf=minimodes.target
+
+[Service]
+ExecStart=/opt/minimodes/bin/gamehost /etc/minimodes/gamehost-%i.toml
+Environment=RUST_LOG=info
+User=minimodes
+Group=minimodes
+EnvironmentFile=/etc/minimodes/minimodes.env
+WorkingDirectory=/var/lib/minimodes
+Restart=always
+RestartSec=2
+# SIGTERM returns players to the lobby and unregisters from Gate first.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/minimodes
+
+[Install]
+WantedBy=minimodes.target

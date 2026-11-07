@@ -1,0 +1,18 @@
+[package]
+name = "mm_db"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+mm_proto.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+uuid = { workspace = true, features = ["v4"] }
+
+[lints]
+workspace = true

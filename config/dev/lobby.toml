@@ -1,0 +1,54 @@
+# Local development: no lobby world, so a flat platform is generated.
+bind = "127.0.0.1:25600"
+max_players = 100
+coordinator_bind = "127.0.0.1:25700"
+gate_api = "http://127.0.0.1:8090"
+keep_loaded_radius = 4
+
+[spawn]
+x = 0.5
+y = 65.0
+z = 0.5
+void_y = 0.0
+
+[threads]
+tokio_workers = 1
+compute = 1
+async_compute = 1
+io = 1
+
+[[npc]]
+label = ["§e§lGame Browser", "§7Click to play"]
+pos = [3.5, 65.0, 0.5]
+yaw = 90.0
+opens = "browser"
+
+# Listed without a database until publishing lands. Negative ids never
+# collide with database games.
+[[game]]
+id = -1
+name = "Test Match"
+creator = "dev"
+description = "Round-based test game"
+icon = "iron_sword"
+kind = "match"
+max_players = 8
+featured = true
+
+[[game]]
+id = -2
+name = "Test World"
+creator = "dev"
+description = "Drop-in world with parallel servers"
+icon = "grass_block"
+kind = "open_world"
+max_players = 20
+
+[[game]]
+id = -3
+name = "Test Prison"
+creator = "dev"
+description = "One persistent world"
+icon = "iron_pickaxe"
+kind = "persistent_world"
+max_players = 50

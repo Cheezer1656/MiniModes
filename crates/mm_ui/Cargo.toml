@@ -1,0 +1,11 @@
+[package]
+name = "mm_ui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+chunkedge.workspace = true
+
+[lints]
+workspace = true

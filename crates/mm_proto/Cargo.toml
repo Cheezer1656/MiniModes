@@ -1,0 +1,17 @@
+[package]
+name = "mm_proto"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+postcard.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "rt", "macros"] }
+
+[lints]
+workspace = true

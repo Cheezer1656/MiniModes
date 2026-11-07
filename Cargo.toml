@@ -1,6 +1,48 @@
-[package]
-name = "minimodes"
+[workspace]
+resolver = "3"
+members = ["bins/*", "crates/*", "tools/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+publish = false
 
-[dependencies]
+[workspace.dependencies]
+# ChunkEdge is pre-1.0 and its crates.io release is stale; bump this rev deliberately.
+chunkedge = { git = "https://github.com/ChunkEdge/ChunkEdge", rev = "23ac30ba5bf84247804c4252e87912719ef26500" }
+chunkedge_binary = { git = "https://github.com/ChunkEdge/ChunkEdge", rev = "23ac30ba5bf84247804c4252e87912719ef26500" }
+anyhow = "1.0.89"
+serde = { version = "1.0.210", features = ["derive"] }
+tokio = { version = "1.40.0", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+toml = "1.1.2"
+tracing = "0.1.40"
+blake3 = "1.5.4"
+postcard = { version = "1.1.1", features = ["use-std"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["json"] }
+serde_json = "1.0.128"
+uuid = { version = "1.10.0", features = ["serde"] }
+zstd = "0.13.2"
+sqlx = { version = "0.8.2", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid", "json"] }
+mm_core = { path = "crates/mm_core" }
+mm_ui = { path = "crates/mm_ui" }
+mm_proto = { path = "crates/mm_proto" }
+mm_gate = { path = "crates/mm_gate" }
+mm_world = { path = "crates/mm_world" }
+mm_db = { path = "crates/mm_db" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Unwinding (not abort) so a panic inside one script VM step can be caught and
+# only that instance torn down.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[workspace.lints.clippy]
+type_complexity = "allow"

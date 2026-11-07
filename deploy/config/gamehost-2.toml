@@ -1,0 +1,16 @@
+shard = 2
+bind = "127.0.0.1:25612"
+max_players = 300
+lobby_coordinator = "127.0.0.1:25700"
+gate_api = "http://127.0.0.1:8080"
+idle_unload_secs = 300
+data_dir = "/var/lib/minimodes"
+autosave_secs = 60
+max_edit_volume = 1000000
+edit_blocks_per_tick = 20000
+
+[threads]
+tokio_workers = 1
+compute = 1
+async_compute = 2
+io = 1

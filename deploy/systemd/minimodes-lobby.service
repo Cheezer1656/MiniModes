@@ -1,0 +1,23 @@
+[Unit]
+Description=Minimodes lobby
+After=network-online.target
+PartOf=minimodes.target
+
+[Service]
+ExecStart=/opt/minimodes/bin/lobby /etc/minimodes/lobby.toml
+Environment=RUST_LOG=info
+User=minimodes
+Group=minimodes
+EnvironmentFile=/etc/minimodes/minimodes.env
+WorkingDirectory=/var/lib/minimodes
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/minimodes
+
+[Install]
+WantedBy=minimodes.target

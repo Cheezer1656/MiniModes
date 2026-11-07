@@ -1,0 +1,20 @@
+[package]
+name = "gamehost"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chunkedge.workspace = true
+mm_core.workspace = true
+mm_db.workspace = true
+mm_world.workspace = true
+mm_gate.workspace = true
+mm_proto.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tracing.workspace = true
+
+[lints]
+workspace = true

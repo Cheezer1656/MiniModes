@@ -1,0 +1,21 @@
+bind = "127.0.0.1:25600"
+max_players = 500
+coordinator_bind = "127.0.0.1:25700"
+gate_api = "http://127.0.0.1:8080"
+# Vanilla world save built for the lobby (must contain `region/`).
+world = "/var/lib/minimodes/lobby-world"
+keep_loaded_radius = 8
+
+[spawn]
+x = 0.5
+y = 65.0
+z = 0.5
+yaw = 0.0
+pitch = 0.0
+void_y = -64.0
+
+[threads]
+tokio_workers = 1
+compute = 1
+async_compute = 1
+io = 1

@@ -1,0 +1,15 @@
+[package]
+name = "mm_core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chunkedge.workspace = true
+serde.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

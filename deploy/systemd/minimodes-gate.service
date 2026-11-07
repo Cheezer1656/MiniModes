@@ -1,0 +1,26 @@
+[Unit]
+Description=Minimodes Gate proxy
+After=network-online.target
+Wants=network-online.target
+PartOf=minimodes.target
+
+[Service]
+ExecStart=/opt/minimodes/bin/gate --config /etc/minimodes/gate.yml --no-auto-reload
+# Gate gets one core's worth of Go scheduler threads; the rest belong to the game servers.
+Environment=GOMAXPROCS=1
+User=minimodes
+Group=minimodes
+EnvironmentFile=/etc/minimodes/minimodes.env
+WorkingDirectory=/var/lib/minimodes
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/minimodes
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=minimodes.target

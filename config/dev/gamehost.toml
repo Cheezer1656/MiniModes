@@ -1,0 +1,16 @@
+shard = 1
+bind = "127.0.0.1:25611"
+max_players = 100
+lobby_coordinator = "127.0.0.1:25700"
+gate_api = "http://127.0.0.1:8090"
+idle_unload_secs = 30
+data_dir = "data"
+autosave_secs = 10
+max_edit_volume = 1000000
+edit_blocks_per_tick = 20000
+
+[threads]
+tokio_workers = 1
+compute = 1
+async_compute = 2
+io = 1

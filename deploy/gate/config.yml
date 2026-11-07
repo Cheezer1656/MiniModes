@@ -1,0 +1,34 @@
+# Gate (classic mode) in front of the lobby and game-host shards.
+# Shards are not listed here: each registers itself through the API on boot.
+config:
+  bind: 0.0.0.0:25565
+  onlineMode: true
+  servers:
+    lobby: 127.0.0.1:25600
+  try:
+    - lobby
+  status:
+    motd: |
+      §6§lMinimodes
+      §7Play and build player-scripted games
+    showMaxPlayers: 1000
+    logPingRequests: false
+  # Players must never reach a shard except through the lobby's handoff.
+  builtinCommands: false
+  announceProxyCommands: false
+  bungeePluginChannelEnabled: false
+  acceptTransfers: false
+  # Secret comes from GATE_VELOCITY_SECRET (see minimodes.env).
+  forwarding:
+    mode: velocity
+  # Players get compression from Gate; backends run uncompressed on loopback.
+  compression:
+    threshold: 256
+    level: -1
+  connectionTimeout: 5s
+  readTimeout: 30s
+  failoverOnUnexpectedServerDisconnect: true
+
+api:
+  enabled: true
+  bind: localhost:8080

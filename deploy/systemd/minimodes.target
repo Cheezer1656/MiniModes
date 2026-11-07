@@ -1,0 +1,6 @@
+[Unit]
+Description=Minimodes network (Gate, lobby, game hosts)
+Wants=minimodes-gate.service minimodes-lobby.service minimodes-gamehost@1.service minimodes-gamehost@2.service
+
+[Install]
+WantedBy=multi-user.target

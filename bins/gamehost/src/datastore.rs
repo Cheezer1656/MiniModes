@@ -11,7 +11,7 @@ use mm_script::{DataEntry, DataReply, DataRequest, DataValue, Event, RequestId, 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::instance::Instance;
-use crate::script::{ScriptConfig, ScriptGeneration, ScriptHost};
+use crate::script::{DataQuota, ScriptConfig, ScriptGeneration, ScriptHost};
 use crate::world::Storage;
 
 type Request = (RequestId, StoreRef, DataRequest);
@@ -29,6 +29,12 @@ impl Default for DataReplies {
     }
 }
 
+/// Counters for metrics.
+#[derive(Resource, Default)]
+pub struct DataStats {
+    pub requests: u64,
+}
+
 /// The worker serving one VM. A restarted VM gets a new one; the old one
 /// finishes what it was sent, and its replies are dropped.
 #[derive(Component)]
@@ -40,13 +46,21 @@ pub struct DataWorker {
 /// Hands the requests from finished steps to their instance's worker.
 pub fn forward_requests(
     mut commands: Commands,
-    mut layers: Query<(Entity, &mut ScriptHost, &Instance, &ScriptGeneration, Option<&DataWorker>)>,
+    mut layers: Query<(
+        Entity,
+        &mut ScriptHost,
+        &Instance,
+        &ScriptGeneration,
+        Option<&DataQuota>,
+        Option<&DataWorker>,
+    )>,
     storage: Res<Storage>,
     replies: Res<DataReplies>,
     config: Res<ScriptConfig>,
     tokio: Res<Tokio>,
+    mut stats: ResMut<DataStats>,
 ) {
-    for (layer, mut host, instance, generation, worker) in &mut layers {
+    for (layer, mut host, instance, generation, quota, worker) in &mut layers {
         let requests = host.take_data_requests();
         if requests.is_empty() {
             continue;
@@ -59,7 +73,7 @@ pub fn forward_requests(
                     db: storage.db.clone(),
                     game: instance.spec.game.0,
                     draft: instance.is_draft(),
-                    quota: config.data_quota,
+                    quota: quota.map_or(config.data_quota, |q| q.0),
                 };
                 let reply = (replies.tx.clone(), layer, generation.0);
                 tokio.0.spawn(serve(scope, rx, reply));
@@ -70,6 +84,7 @@ pub fn forward_requests(
                 tx
             }
         };
+        stats.requests += requests.len() as u64;
         for request in requests {
             let _ = tx.send(request);
         }

@@ -13,6 +13,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::runtime::{Handle, Runtime};
 
+pub mod metrics;
+
 /// Environment variable holding the Velocity modern-forwarding secret shared
 /// with Gate (`GATE_VELOCITY_SECRET` on the proxy side).
 pub const VELOCITY_SECRET_ENV: &str = "MINIMODES_VELOCITY_SECRET";

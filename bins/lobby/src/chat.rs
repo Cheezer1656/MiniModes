@@ -2,10 +2,12 @@
 
 use chunkedge::message::ChatReceivedMessage;
 use chunkedge::prelude::*;
-use mm_proto::GameKind;
+use chunkedge::UniqueId;
+use mm_proto::{GameId, GameKind};
 
 use crate::account::CreateGameRequest;
 use crate::catalog::{GameCatalog, PlayerGames};
+use crate::moderation::FileReport;
 use crate::ui::open_search_results;
 use crate::world::LobbyLayer;
 
@@ -16,6 +18,8 @@ const NAME_LEN: std::ops::RangeInclusive<usize> = 3..=32;
 pub enum PromptPurpose {
     Search,
     GameName { kind: GameKind, icon: &'static str },
+    /// Why the player is reporting this game.
+    Report(GameId),
 }
 
 /// While present, the player's next chat message answers this prompt instead of chatting.
@@ -45,13 +49,14 @@ impl Plugin for ChatPlugin {
 fn handle_chat(
     mut commands: Commands,
     mut messages: MessageReader<ChatReceivedMessage>,
-    mut players: Query<(&mut Client, &Username, &PlayerGames, Option<&ChatPrompt>)>,
+    mut players: Query<(&mut Client, &Username, &UniqueId, &PlayerGames, Option<&ChatPrompt>)>,
     mut layer: Single<&mut ChunkLayer, With<LobbyLayer>>,
     mut creates: MessageWriter<CreateGameRequest>,
+    mut reports: MessageWriter<FileReport>,
     catalog: Res<GameCatalog>,
 ) {
     for msg in messages.read() {
-        let Ok((mut client, username, games, prompt)) = players.get_mut(msg.client) else {
+        let Ok((mut client, username, uuid, games, prompt)) = players.get_mut(msg.client) else {
             continue;
         };
         // Players can't inject formatting codes.
@@ -70,6 +75,15 @@ fn handle_chat(
             match &prompt.purpose {
                 PromptPurpose::Search => {
                     open_search_results(&mut commands, msg.client, text, &catalog, games);
+                }
+                PromptPurpose::Report(game) => {
+                    reports.write(FileReport {
+                        client: Some(msg.client),
+                        reporter: uuid.0,
+                        game: *game,
+                        version: None,
+                        reason: text.to_owned(),
+                    });
                 }
                 PromptPurpose::GameName { kind, icon } => {
                     if !NAME_LEN.contains(&text.chars().count()) {

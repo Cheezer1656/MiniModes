@@ -10,6 +10,7 @@ use chunkedge::message::ChatReceivedMessage;
 use chunkedge::prelude::*;
 use chunkedge::UniqueId;
 use mm_core::Tokio;
+use mm_core::metrics::TickTimes;
 use chunkedge::world_border::WorldBorderBundle;
 use mm_proto::ipc::{GameVersion, InstanceId, InstanceSpec, InstanceStatus, LobbyMsg, ShardMsg};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -38,6 +39,16 @@ pub struct Instance {
 }
 
 impl Instance {
+    #[cfg(test)]
+    pub fn new_for_test(spec: InstanceSpec) -> Self {
+        Self {
+            spec,
+            started: false,
+            empty_since: None,
+            closing: None,
+        }
+    }
+
     pub fn is_draft(&self) -> bool {
         self.spec.version == GameVersion::Draft
     }
@@ -93,26 +104,17 @@ struct LobbyTransfers {
     failed: (UnboundedSender<Entity>, UnboundedReceiver<Entity>),
 }
 
-/// Recent tick durations for the heartbeat's p99.
-#[derive(Resource, Default)]
-struct TickTimes {
-    start: Option<Instant>,
-    samples: std::collections::VecDeque<f32>,
-}
-
 pub struct InstancePlugin;
 
 impl Plugin for InstancePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Instances>()
-            .init_resource::<TickTimes>()
             .insert_resource(LobbyTransfers {
                 failed: mpsc::unbounded_channel(),
             })
             .add_message::<SendToLobby>()
             .add_message::<StopRequest>()
             .add_systems(Startup, spawn_limbo)
-            .add_systems(First, start_tick_timer)
             .add_systems(
                 Update,
                 (
@@ -130,8 +132,7 @@ impl Plugin for InstancePlugin {
                 )
                     .chain()
                     .in_set(InstanceSet),
-            )
-            .add_systems(Last, end_tick_timer);
+            );
     }
 }
 
@@ -159,6 +160,7 @@ fn apply_lobby_messages(
     mut reloads: MessageWriter<crate::script::ReloadDraft>,
     mut saves: MessageWriter<crate::world::SaveDraft>,
     mut publishes: MessageWriter<crate::world::ApplyPublish>,
+    mut quotas: ResMut<crate::moderation::RankQuotas>,
 ) {
     let mut stopping: Vec<(InstanceId, bool)> = stops.read().map(|s| (s.instance, s.graceful)).collect();
     while let Ok(msg) = link.inbox.try_recv() {
@@ -215,6 +217,10 @@ fn apply_lobby_messages(
             LobbyMsg::ApplyPublish { game, version } => {
                 tracing::info!("game {} published v{version}", game.0);
                 publishes.write(crate::world::ApplyPublish { game });
+            }
+            LobbyMsg::RankQuotas { default, ranks } => {
+                quotas.default = Some(default);
+                quotas.ranks = ranks.into_iter().collect();
             }
         }
     }
@@ -480,30 +486,6 @@ fn heartbeat(
     *link.snapshot.lock().unwrap() = statuses.clone();
     link.send(ShardMsg::Heartbeat {
         instances: statuses,
-        tick_p99_ms: times.p99(),
+        tick_p99_ms: times.quantile(0.99),
     });
-}
-
-impl TickTimes {
-    fn p99(&self) -> f32 {
-        let mut sorted: Vec<f32> = self.samples.iter().copied().collect();
-        if sorted.is_empty() {
-            return 0.0;
-        }
-        sorted.sort_by(f32::total_cmp);
-        sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)]
-    }
-}
-
-fn start_tick_timer(mut times: ResMut<TickTimes>) {
-    times.start = Some(Instant::now());
-}
-
-fn end_tick_timer(mut times: ResMut<TickTimes>) {
-    if let Some(start) = times.start.take() {
-        if times.samples.len() == 200 {
-            times.samples.pop_front();
-        }
-        times.samples.push_back(start.elapsed().as_secs_f32() * 1000.0);
-    }
 }

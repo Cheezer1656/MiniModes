@@ -1,0 +1,18 @@
+[Unit]
+Description=Minimodes nightly backup (Postgres + maps to Object Storage)
+After=postgresql.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/minimodes/bin/minimodes-backup.sh
+User=minimodes
+Group=minimodes
+EnvironmentFile=/etc/minimodes/minimodes.env
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/minimodes

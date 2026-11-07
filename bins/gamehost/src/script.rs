@@ -35,6 +35,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::instance::{InInstance, Instance, SendToLobby, StopRequest};
 use crate::link::LobbyLink;
 use crate::matches::MatchCommand;
+use crate::moderation::{RankQuotas, TextAudit, TextLog, command_texts};
 use crate::players::Ready;
 use crate::world::{GameWorld, Storage};
 
@@ -64,7 +65,11 @@ pub struct ScriptConfig {
 #[derive(Component, Default)]
 pub struct GameRules(pub RuleSet);
 
-type StepResult = (Box<Vm>, Result<StepOutput, String>);
+/// The VM, its output (or the panic), and how long the step took.
+type StepResult = (Box<Vm>, Result<StepOutput, String>, Duration);
+
+/// Step durations kept for metrics.
+const STEP_SAMPLES: usize = 100;
 
 enum Slot {
     Idle(Box<Vm>),
@@ -79,6 +84,7 @@ pub struct ScriptHost {
     inbox: Vec<Event>,
     ids: HashMap<Entity, PlayerId>,
     entities: HashMap<PlayerId, Entity>,
+    uuids: HashMap<PlayerId, Uuid>,
     next_id: PlayerId,
     pending_blocks: VecDeque<([i32; 3], BlockState)>,
     /// The VM's block copy is stale (map edited outside scripts).
@@ -91,6 +97,10 @@ pub struct ScriptHost {
     closed: bool,
     /// DataStore requests for the instance's worker.
     data_requests: Vec<(mm_script::RequestId, mm_script::StoreRef, mm_script::DataRequest)>,
+    /// Recent step durations in milliseconds.
+    step_ms: VecDeque<f32>,
+    /// Luau heap after the last step.
+    memory: usize,
 }
 
 impl ScriptHost {
@@ -100,6 +110,7 @@ impl ScriptHost {
             inbox: Vec::new(),
             ids: HashMap::new(),
             entities: HashMap::new(),
+            uuids: HashMap::new(),
             next_id: 1,
             pending_blocks: VecDeque::new(),
             resync: false,
@@ -108,8 +119,20 @@ impl ScriptHost {
             close_sent: false,
             closed: false,
             data_requests: Vec::new(),
+            step_ms: VecDeque::new(),
+            memory: 0,
         }
     }
+
+    /// Step duration in milliseconds at quantile `q` (recent steps).
+    pub fn step_quantile(&self, q: f32) -> f32 {
+        mm_core::metrics::quantile(self.step_ms.iter().copied(), q)
+    }
+
+    pub fn memory(&self) -> usize {
+        self.memory
+    }
+
 
     pub fn push(&mut self, event: Event) {
         self.inbox.push(event);
@@ -168,6 +191,8 @@ enum LoadEvent {
         game: GameId,
         generation: u64,
         result: Result<Option<Box<Vm>>, String>,
+        /// Bytes the game's DataStores may hold, from the owner's rank.
+        data_quota: i64,
     },
     EditorLink {
         client: Entity,
@@ -180,6 +205,10 @@ struct Loads {
     tx: UnboundedSender<LoadEvent>,
     rx: UnboundedReceiver<LoadEvent>,
 }
+
+/// Bytes the instance's game may keep in DataStores.
+#[derive(Component)]
+pub struct DataQuota(pub i64);
 
 /// Bumped on every (re)load, so a slow stale load is ignored.
 #[derive(Component)]
@@ -223,6 +252,7 @@ impl Plugin for ScriptPlugin {
         let (tx, rx) = mpsc::unbounded_channel();
         app.insert_resource(Loads { tx, rx })
             .init_resource::<crate::datastore::DataReplies>()
+            .init_resource::<crate::datastore::DataStats>()
             .add_message::<ReloadDraft>()
             .add_message::<RestartScripts>()
             .add_systems(
@@ -253,13 +283,20 @@ struct Loader<'w> {
     storage: Res<'w, Storage>,
     loads: Res<'w, Loads>,
     config: Res<'w, ScriptConfig>,
+    quotas: Res<'w, RankQuotas>,
     tokio: Res<'w, Tokio>,
 }
 
 impl Loader<'_> {
-    /// Loads the instance's scripts and builds a VM off the main thread.
+    /// Loads the instance's scripts and builds a VM off the main thread,
+    /// with the memory and DataStore quota of the owner's rank.
     fn start(&self, layer: Entity, generation: u64, instance: &Instance, world: &GameWorld) {
-        let (db, tx, limits) = (self.storage.db.clone(), self.loads.tx.clone(), self.config.limits.clone());
+        let (db, tx, mut limits) = (self.storage.db.clone(), self.loads.tx.clone(), self.config.limits.clone());
+        let mut data_quota = self.config.data_quota;
+        let quotas = RankQuotas {
+            default: self.quotas.default,
+            ranks: self.quotas.ranks.clone(),
+        };
         let game = instance.spec.game;
         let version = world.version;
         let blocks = world.mirror.clone();
@@ -272,6 +309,13 @@ impl Loader<'_> {
         };
         self.tokio.0.spawn(async move {
             let result = async {
+                let rank = mm_db::moderation::owner_rank(&db, game.0)
+                    .await
+                    .map_err(|e| format!("loading the owner's rank: {e}"))?;
+                if let Some(quota) = quotas.get(rank.as_deref()) {
+                    limits.memory = (quota.memory_mb as usize) << 20;
+                    data_quota = i64::from(quota.datastore_mb) << 20;
+                }
                 let files = match version {
                     None => mm_db::draft_files(&db, game.0).await,
                     Some(v) => mm_db::publish::version(&db, game.0, v).await.map(|v| v.map(|v| v.files).unwrap_or_default()),
@@ -291,6 +335,7 @@ impl Loader<'_> {
                 game,
                 generation,
                 result,
+                data_quota,
             });
         });
     }
@@ -305,7 +350,7 @@ fn load_new_worlds(
     for (layer, instance, world) in &layers {
         commands
             .entity(layer)
-            .insert((ScriptGeneration(1), GameRules::default(), ConsoleBudget::default()));
+            .insert((ScriptGeneration(1), GameRules::default(), ConsoleBudget::default(), TextAudit::default()));
         loader.start(layer, 1, instance, world);
     }
 }
@@ -457,13 +502,14 @@ fn apply_loads(
     link: Res<LobbyLink>,
 ) {
     while let Ok(event) = loads.rx.try_recv() {
-        let (layer, game, generation, result) = match event {
+        let (layer, game, generation, result, data_quota) = match event {
             LoadEvent::Loaded {
                 layer,
                 game,
                 generation,
                 result,
-            } => (layer, game, generation, result),
+                data_quota,
+            } => (layer, game, generation, result, data_quota),
             LoadEvent::EditorLink { client, result } => {
                 let text = match result {
                     Ok(url) => Text::text("§7Open the script editor: ")
@@ -492,7 +538,7 @@ fn apply_loads(
         let draft = instance.is_draft();
         let notice = match result {
             Ok(Some(vm)) => {
-                commands.entity(layer).insert(ScriptHost::new(vm));
+                commands.entity(layer).insert((ScriptHost::new(vm), DataQuota(data_quota)));
                 report(&link, game, DiagnosticLevel::System, "scripts started");
                 "§aScripts started.".to_owned()
             }
@@ -546,8 +592,10 @@ fn poll_steps(
         &mut ChunkLayer,
         &mut GameWorld,
         &mut ConsoleBudget,
+        &mut TextAudit,
     )>,
     mut players: Query<PlayerParts, With<InInstance>>,
+    mut text_log: ResMut<TextLog>,
     mut to_lobby: MessageWriter<SendToLobby>,
     mut matches: MessageWriter<MatchCommand>,
     mut stops: MessageWriter<StopRequest>,
@@ -555,7 +603,7 @@ fn poll_steps(
     server: Res<Server>,
 ) {
     let tick = server.current_tick() as u64;
-    for (layer, instance, mut host, mut rules, mut chunks, mut world, mut budget) in &mut layers {
+    for (layer, instance, mut host, mut rules, mut chunks, mut world, mut budget, mut audit) in &mut layers {
         let dropped = budget.roll(tick);
         if dropped > 0 {
             report(
@@ -568,9 +616,14 @@ fn poll_steps(
         let Slot::Running(task) = &mut host.slot else {
             continue;
         };
-        let Some((vm, result)) = block_on(poll_once(task)) else {
+        let Some((vm, result, took)) = block_on(poll_once(task)) else {
             continue;
         };
+        if host.step_ms.len() == STEP_SAMPLES {
+            host.step_ms.pop_front();
+        }
+        host.step_ms.push_back(took.as_secs_f32() * 1000.0);
+        host.memory = vm.used_memory();
         let game = instance.spec.game;
         let out = match result {
             Ok(out) => out,
@@ -610,6 +663,10 @@ fn poll_steps(
                     matches.write(MatchCommand::End { layer, winners });
                 }
                 command => {
+                    for (id, kind, text) in command_texts(&command) {
+                        let who = (id, host.uuids.get(&id).copied());
+                        audit.record(&mut text_log, tick, instance, who, kind, text);
+                    }
                     apply_command(command, &mut host, &mut rules, &mut chunks, &mut world, &mut players, &mut to_lobby)
                 }
             }
@@ -800,14 +857,14 @@ fn apply_pending_blocks(mut layers: Query<(&mut ScriptHost, &mut ChunkLayer, &mu
 /// Tells each VM who arrived and who left since the last tick, and when
 /// its instance started closing.
 fn track_members(
-    mut layers: Query<(Entity, &mut ScriptHost, &Instance)>,
+    mut layers: Query<(Entity, &mut ScriptHost, &Instance, Option<&mut TextAudit>)>,
     players: Query<(Entity, &InInstance, &Username, &UniqueId), (With<Client>, With<Ready>)>,
 ) {
     let mut members: HashMap<Entity, Vec<(Entity, &Username, &UniqueId)>> = HashMap::new();
     for (entity, in_instance, name, uuid) in &players {
         members.entry(in_instance.0).or_default().push((entity, name, uuid));
     }
-    for (layer, mut host, instance) in &mut layers {
+    for (layer, mut host, instance, mut audit) in &mut layers {
         let present = if instance.closing.is_some() {
             Vec::new()
         } else {
@@ -822,6 +879,10 @@ fn track_members(
         for (entity, id) in gone {
             host.ids.remove(&entity);
             host.entities.remove(&id);
+            host.uuids.remove(&id);
+            if let Some(audit) = audit.as_mut() {
+                audit.forget(id);
+            }
             host.inbox.push(Event::PlayerRemoving { id });
         }
         for (entity, name, uuid) in present {
@@ -832,6 +893,7 @@ fn track_members(
             host.next_id += 1;
             host.ids.insert(entity, id);
             host.entities.insert(id, entity);
+            host.uuids.insert(id, uuid.0);
             host.inbox.push(Event::PlayerAdded {
                 id,
                 name: name.0.clone(),
@@ -940,7 +1002,9 @@ fn spawn_steps(
         };
         let events = std::mem::take(&mut host.inbox);
         let task = AsyncComputeTaskPool::get().spawn(async move {
+            let start = Instant::now();
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| vm.step(snapshot, events)));
+            let took = start.elapsed();
             let result = result.map_err(|panic| {
                 panic
                     .downcast_ref::<&str>()
@@ -948,7 +1012,7 @@ fn spawn_steps(
                     .or_else(|| panic.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "panic".to_owned())
             });
-            (vm, result)
+            (vm, result, took)
         });
         host.slot = Slot::Running(task);
     }

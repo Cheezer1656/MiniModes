@@ -4,11 +4,12 @@
 pub mod datastore;
 pub mod editor;
 pub mod library;
+pub mod moderation;
 pub mod publish;
 
 use std::time::Duration;
 
-use mm_proto::{GameId, GameKind, GameSummary};
+use mm_proto::{GameId, GameKind, GameSummary, Hold};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
@@ -82,11 +83,17 @@ pub struct GameRow {
     pub rating_count: i64,
     /// Distinct players who joined the published game.
     pub play_count: i64,
+    /// Moderation hold: `review` or `removed`.
+    pub hold: Option<String>,
 }
 
 impl GameRow {
     pub fn kind(&self) -> GameKind {
         kind_from_str(&self.kind).unwrap_or(GameKind::Match)
+    }
+
+    pub fn hold(&self) -> Option<Hold> {
+        self.hold.as_deref().and_then(Hold::parse)
     }
 
     pub fn summary(&self) -> GameSummary {
@@ -104,6 +111,7 @@ impl GameRow {
             rating: self.rating_avg.map(|r| r as f32),
             ratings: self.rating_count as u32,
             plays: self.play_count as u32,
+            hold: self.hold(),
         }
     }
 }
@@ -114,7 +122,7 @@ pub(crate) const GAME_COLUMNS: &str = "g.id, g.owner, p.username AS owner_name, 
      COALESCE((g.settings->>'save_player_state')::boolean, true) AS save_player_state, \
      (SELECT avg(r.stars)::float8 FROM ratings r WHERE r.game = g.id) AS rating_avg, \
      (SELECT count(*) FROM ratings r WHERE r.game = g.id) AS rating_count, \
-     (SELECT count(*) FROM plays pl WHERE pl.game = g.id) AS play_count";
+     (SELECT count(*) FROM plays pl WHERE pl.game = g.id) AS play_count, g.hold";
 
 /// Records a login and returns the player's rank, if one was granted.
 pub async fn player_joined(pool: &PgPool, uuid: Uuid, username: &str) -> sqlx::Result<Option<String>> {
@@ -194,7 +202,7 @@ pub async fn owned_games(pool: &PgPool, owner: Uuid) -> sqlx::Result<Vec<GameRow
 pub async fn listed_games(pool: &PgPool) -> sqlx::Result<Vec<GameRow>> {
     sqlx::query_as(&format!(
         "SELECT {GAME_COLUMNS} FROM games g JOIN players p ON p.uuid = g.owner
-         WHERE g.listed AND g.published_version IS NOT NULL ORDER BY g.first_published_at DESC"
+         WHERE g.listed AND g.hold IS NULL AND g.published_version IS NOT NULL ORDER BY g.first_published_at DESC"
     ))
     .fetch_all(pool)
     .await

@@ -47,13 +47,16 @@ impl Role {
     }
 }
 
-/// What `player` may do with `game`'s draft, if anything.
+/// What `player` may do with `game`'s draft, if anything. Banned creators
+/// may do nothing.
 pub async fn role(pool: &PgPool, game: i64, player: Uuid) -> sqlx::Result<Option<Role>> {
-    let row: Option<(bool,)> = sqlx::query_as(
+    let row: Option<(bool,)> = sqlx::query_as(&format!(
         "SELECT g.owner = $2 FROM games g
          WHERE g.id = $1 AND (g.owner = $2 OR EXISTS (
-             SELECT 1 FROM game_collaborators c WHERE c.game = g.id AND c.player = $2))",
-    )
+             SELECT 1 FROM game_collaborators c WHERE c.game = g.id AND c.player = $2))
+         AND NOT {}",
+        crate::moderation::BANNED.replace("$PLAYER", "$2")
+    ))
     .bind(game)
     .bind(player)
     .fetch_optional(pool)

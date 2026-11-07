@@ -128,6 +128,14 @@ fn run_publish(db: &Db, tokio: &Tokio, tx: &UnboundedSender<Done>, w: Waiting) {
                 client: w.client,
                 message: "§cThat game no longer exists.",
             },
+            Ok(PublishOutcome::Banned) => Done::Refused {
+                client: w.client,
+                message: "§cYou're banned from creating games, so you can't publish.",
+            },
+            Ok(PublishOutcome::Removed) => Done::Refused {
+                client: w.client,
+                message: "§cModerators took this game down, so it can't be published.",
+            },
             Err(e) => {
                 tracing::error!("publishing game {}: {e}", w.game.0);
                 Done::Refused {
@@ -199,10 +207,14 @@ fn apply_results(
                 if let Some(owned) = games.owned.iter_mut().find(|g| g.id == game.id) {
                     *owned = game.clone();
                 }
-                c.send_chat_message(format!(
-                    "§aPublished §f{}§a v{}! It's listed in the Game Browser.",
-                    game.name, game.version
-                ));
+                c.send_chat_message(if game.hold.is_some() {
+                    format!(
+                        "§aPublished §f{}§a v{}. §6It's under moderator review, so it stays out of the Game Browser for now.",
+                        game.name, game.version
+                    )
+                } else {
+                    format!("§aPublished §f{}§a v{}! It's listed in the Game Browser.", game.name, game.version)
+                });
                 let persistent = game.kind
                     == GameKind::OpenWorld {
                         persistent_world: true,

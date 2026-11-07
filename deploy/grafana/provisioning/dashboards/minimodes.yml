@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: minimodes
+    folder: Minimodes
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards/minimodes

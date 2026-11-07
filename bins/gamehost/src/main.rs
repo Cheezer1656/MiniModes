@@ -6,6 +6,8 @@ mod datastore;
 mod instance;
 mod link;
 mod matches;
+mod metrics;
+mod moderation;
 mod players;
 mod script;
 mod world;
@@ -48,6 +50,11 @@ fn main() -> anyhow::Result<()> {
         .add_plugins(DefaultPlugins);
 
     // After DefaultPlugins so the tasks' logs reach LogPlugin's subscriber.
+    let metrics = mm_core::metrics::MetricsText::default();
+    if let Some(bind) = config.metrics_bind {
+        mm_core::metrics::serve(runtime.handle(), bind, metrics.clone());
+    }
+
     let lobby = link::connect_lobby(runtime.handle(), config.lobby_coordinator, config.shard_id(), gate_name.clone());
     runtime.spawn(link::keep_registered(
         gate.client.clone(),
@@ -57,6 +64,7 @@ fn main() -> anyhow::Result<()> {
     runtime.spawn(link::shutdown_on_signal(gate.clone(), gate_name, shutdown_tx));
 
     app.insert_resource(lobby)
+        .insert_resource(metrics)
         .insert_resource(gate)
         .insert_resource(ShutdownRequests(shutdown_rx))
         .insert_resource(IdleUnload(Duration::from_secs(config.idle_unload_secs)))
@@ -88,6 +96,9 @@ fn main() -> anyhow::Result<()> {
             script::ScriptPlugin,
             players::PlayersPlugin,
             matches::MatchPlugin,
+            moderation::ModerationPlugin,
+            metrics::MetricsPlugin,
+            mm_core::metrics::TickTimerPlugin,
         ))
         .run();
 

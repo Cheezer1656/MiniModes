@@ -8,6 +8,10 @@ data_dir = "/var/lib/minimodes"
 autosave_secs = 60
 max_edit_volume = 1000000
 edit_blocks_per_tick = 20000
+# Where `/script edit` links point (Caddy in front of the lobby's editor).
+editor_url = "https://edit.example.net"
+# Prometheus scrapes this (loopback only).
+metrics_bind = "127.0.0.1:9112"
 
 [threads]
 tokio_workers = 1

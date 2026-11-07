@@ -41,12 +41,15 @@ pub struct GamehostConfig {
     pub threads: ThreadConfig,
     #[serde(default)]
     pub scripts: ScriptSettings,
+    /// Loopback address serving Prometheus metrics at `/metrics`; unset disables them.
+    pub metrics_bind: Option<SocketAddr>,
     /// Public origin of the lobby's web editor, e.g. `https://edit.example.net`.
     /// `/script edit` links point here; unset disables the command.
     pub editor_url: Option<String>,
 }
 
-/// Per-VM script limits. Memory will come from the owner's rank later.
+/// Per-VM script limits. The lobby sends memory and DataStore quotas by
+/// the owner's rank; these values apply until it does.
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ScriptSettings {
@@ -58,7 +61,7 @@ pub struct ScriptSettings {
     pub max_fill_volume: u64,
     /// Script block writes applied per instance per tick.
     pub blocks_per_tick: usize,
-    /// What one game's DataStores may hold. Will come from the owner's rank.
+    /// What one game's DataStores may hold.
     pub datastore_quota_mb: i64,
     /// Largest single DataStore value, as JSON.
     pub datastore_value_kb: usize,

@@ -21,6 +21,10 @@ pub enum PublishOutcome {
     NoGame,
     /// Only the owner may publish.
     NotOwner,
+    /// The owner has a creator ban.
+    Banned,
+    /// Moderators took the game down.
+    Removed,
 }
 
 /// What a publish left for a persistent world to apply on its next load.
@@ -64,19 +68,28 @@ fn merge(old: Option<Pending>, new: Pending) -> Pending {
 }
 
 /// Snapshots the draft (map pointer and scripts) as the next version and
-/// lists the game. Save a running draft's map first.
+/// lists the game (a game on hold stays out of the browser until cleared).
+/// Save a running draft's map first.
 pub async fn publish(pool: &PgPool, game: i64, by: Uuid, mode: LiveUpdate) -> sqlx::Result<PublishOutcome> {
     let mut tx = pool.begin().await?;
-    let row: Option<(Uuid, String, Option<i32>, Option<String>)> =
-        sqlx::query_as("SELECT owner, kind, published_version, draft_map_hash FROM games WHERE id = $1 FOR UPDATE")
-            .bind(game)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let Some((owner, kind, published, map_hash)) = row else {
+    let row: Option<(Uuid, String, Option<i32>, Option<String>, Option<String>, bool)> = sqlx::query_as(&format!(
+        "SELECT owner, kind, published_version, draft_map_hash, hold, {} FROM games WHERE id = $1 FOR UPDATE",
+        crate::moderation::BANNED.replace("$PLAYER", "owner")
+    ))
+    .bind(game)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((owner, kind, published, map_hash, hold, banned)) = row else {
         return Ok(PublishOutcome::NoGame);
     };
     if owner != by {
         return Ok(PublishOutcome::NotOwner);
+    }
+    if banned {
+        return Ok(PublishOutcome::Banned);
+    }
+    if hold.as_deref() == Some("removed") {
+        return Ok(PublishOutcome::Removed);
     }
     let version = published.unwrap_or(0) + 1;
     sqlx::query("INSERT INTO game_versions (game, version, map_hash, published_by) VALUES ($1, $2, $3, $4)")

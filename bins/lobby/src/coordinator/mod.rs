@@ -392,6 +392,7 @@ fn notify(clients: &mut LobbyClients, client: Entity, msg: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pump_network(
     mut coordinator: ResMut<Coordinator>,
     mut catalog: ResMut<GameCatalog>,
@@ -399,6 +400,8 @@ fn pump_network(
     tokio: Res<Tokio>,
     console: Res<crate::web::Console>,
     mut played: MessageWriter<crate::library::Played>,
+    mut reports: MessageWriter<crate::moderation::FileReport>,
+    ranks: Res<crate::account::Ranks>,
 ) {
     let coordinator = &mut *coordinator;
     let mut changed = false;
@@ -414,6 +417,7 @@ fn pump_network(
                 tx,
             } => {
                 tracing::info!("shard {} ({gate_name}) connected with {} instance(s)", shard.0, instances.len());
+                let _ = tx.send(ranks.quotas_msg());
                 let replaced = coordinator.directory.connect(
                     shard,
                     Shard {
@@ -518,6 +522,20 @@ fn pump_network(
                         }
                     }
                     ShardMsg::DraftSaved { request, ok } => coordinator.draft_saves.push((request, ok)),
+                    ShardMsg::Report {
+                        game,
+                        version,
+                        reporter,
+                        reason,
+                    } => {
+                        reports.write(crate::moderation::FileReport {
+                            client: None,
+                            reporter,
+                            game,
+                            version,
+                            reason,
+                        });
+                    }
                     ShardMsg::Diagnostic { game, level, message } => {
                         match level {
                             DiagnosticLevel::Info => {}

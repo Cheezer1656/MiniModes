@@ -7,6 +7,7 @@ use chunkedge::UniqueId;
 use chunkedge::prelude::*;
 use mm_core::Tokio;
 use mm_db::{NewGame, Pool};
+use mm_proto::ipc::{LobbyMsg, RankQuota};
 use mm_proto::{GameId, GameKind, GameSummary};
 use serde::Deserialize;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -15,13 +16,42 @@ use crate::catalog::PlayerGames;
 
 pub const DEFAULT_RANK: &str = "member";
 
-/// What each rank may build.
+/// What each rank may build, and staff powers.
 #[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct RankLimits {
     /// Build area side length: 128, 256 or 512.
     pub map_size: i32,
     pub max_drafts: i64,
+    /// Luau heap per instance of the player's games.
+    #[serde(default = "default_memory_mb")]
+    pub memory_mb: u32,
+    /// What each of the player's games may keep in DataStores.
+    #[serde(default = "default_datastore_mb")]
+    pub datastore_mb: u32,
+    /// May use `/mod`, file holds and take games down, and ban creators.
+    #[serde(default)]
+    pub moderator: bool,
+    /// May grant ranks.
+    #[serde(default)]
+    pub admin: bool,
+}
+
+fn default_memory_mb() -> u32 {
+    64
+}
+
+fn default_datastore_mb() -> u32 {
+    16
+}
+
+impl RankLimits {
+    pub fn quota(&self) -> RankQuota {
+        RankQuota {
+            memory_mb: self.memory_mb,
+            datastore_mb: self.datastore_mb,
+        }
+    }
 }
 
 #[derive(Resource, Clone)]
@@ -35,15 +65,37 @@ impl Ranks {
             .unwrap_or(RankLimits {
                 map_size: 128,
                 max_drafts: 1,
+                memory_mb: default_memory_mb(),
+                datastore_mb: default_datastore_mb(),
+                moderator: false,
+                admin: false,
             })
+    }
+
+    /// For shards: quotas by rank.
+    pub fn quotas_msg(&self) -> LobbyMsg {
+        LobbyMsg::RankQuotas {
+            default: self.limits(None).quota(),
+            ranks: self.0.iter().map(|(name, l)| (name.clone(), l.quota())).collect(),
+        }
     }
 }
 
 pub fn default_ranks() -> HashMap<String, RankLimits> {
+    let rank = |map_size, max_drafts, memory_mb, datastore_mb, moderator, admin| RankLimits {
+        map_size,
+        max_drafts,
+        memory_mb,
+        datastore_mb,
+        moderator,
+        admin,
+    };
     HashMap::from([
-        (DEFAULT_RANK.to_owned(), RankLimits { map_size: 128, max_drafts: 3 }),
-        ("plus".to_owned(), RankLimits { map_size: 256, max_drafts: 6 }),
-        ("creator".to_owned(), RankLimits { map_size: 512, max_drafts: 12 }),
+        (DEFAULT_RANK.to_owned(), rank(128, 3, 64, 16, false, false)),
+        ("plus".to_owned(), rank(256, 6, 96, 32, false, false)),
+        ("creator".to_owned(), rank(512, 12, 128, 64, false, false)),
+        ("moderator".to_owned(), rank(256, 6, 96, 32, true, false)),
+        ("admin".to_owned(), rank(512, 12, 128, 64, true, true)),
     ])
 }
 
@@ -67,6 +119,7 @@ enum DbEvent {
     Loaded {
         client: Entity,
         rank: Option<String>,
+        creator_ban: Option<mm_db::moderation::Ban>,
         owned: Vec<GameSummary>,
         shared: Vec<GameSummary>,
         player_saves: HashSet<GameId>,
@@ -117,14 +170,16 @@ fn load_accounts(
                 let owned = mm_db::owned_games(&pool, uuid).await?;
                 let shared = mm_db::editor::shared_games(&pool, uuid).await?;
                 let library = mm_db::library::library(&pool, uuid).await?;
-                Ok::<_, sqlx::Error>((rank, owned, shared, library))
+                let ban = mm_db::moderation::creator_ban(&pool, uuid).await?;
+                Ok::<_, sqlx::Error>((rank, ban, owned, shared, library))
             }
             .await;
             let _ = tx.send(match result {
-                Ok((rank, owned, shared, library)) => DbEvent::Loaded {
+                Ok((rank, creator_ban, owned, shared, library)) => DbEvent::Loaded {
                     library,
                     client,
                     rank,
+                    creator_ban,
                     player_saves: owned.iter().filter(|g| g.save_player_state).map(|g| GameId(g.id)).collect(),
                     owned: owned.iter().map(|g| g.summary()).collect(),
                     shared: shared.iter().map(|g| g.summary()).collect(),
@@ -155,6 +210,10 @@ fn create_games(
         };
         if !games.loaded {
             client.send_chat_message("§cStill loading your account; try again in a moment.");
+            continue;
+        }
+        if let Some(ban) = &games.creator_ban {
+            client.send_chat_message(crate::moderation::ban_message(ban));
             continue;
         }
         let limits = ranks.limits(games.rank.as_deref());
@@ -195,6 +254,7 @@ fn apply_db_events(mut events: ResMut<DbEvents>, mut players: Query<(&mut Client
             DbEvent::Loaded {
                 client,
                 rank,
+                creator_ban,
                 owned,
                 shared,
                 player_saves,
@@ -206,6 +266,7 @@ fn apply_db_events(mut events: ResMut<DbEvents>, mut players: Query<(&mut Client
                         games.set_library(library);
                     }
                     games.rank = rank;
+                    games.creator_ban = creator_ban;
                     games.player_saves = player_saves;
                     games.owned = owned;
                     games.shared = shared;

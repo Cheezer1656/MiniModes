@@ -28,11 +28,15 @@ pub struct LobbyConfig {
     pub npcs: Vec<NpcConfig>,
     #[serde(default = "default_hotbar")]
     pub hotbar: Vec<HotbarConfig>,
-    /// Build limits per rank; players without a rank row are `member`.
+    /// Limits and staff powers per rank; players without a rank row are `member`.
     #[serde(default = "crate::account::default_ranks")]
     pub ranks: HashMap<String, crate::account::RankLimits>,
     /// The web script editor; unset disables it.
     pub web: Option<crate::web::WebConfig>,
+    #[serde(default)]
+    pub moderation: crate::moderation::ModerationConfig,
+    /// Loopback address serving Prometheus metrics at `/metrics`; unset disables them.
+    pub metrics_bind: Option<SocketAddr>,
 }
 
 #[derive(Resource, Deserialize, Clone, Copy)]

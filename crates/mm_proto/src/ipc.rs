@@ -94,6 +94,23 @@ pub enum ShardMsg {
     },
     /// Answers [`LobbyMsg::SaveDraft`]: the draft's map is in Postgres as of now.
     DraftSaved { request: u64, ok: bool },
+    /// A player ran `/report` in a game; the lobby files it.
+    Report {
+        game: GameId,
+        /// `None` in a draft.
+        version: Option<u32>,
+        reporter: Uuid,
+        reason: String,
+    },
+}
+
+/// Script limits that come from a game owner's rank.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RankQuota {
+    /// Luau heap per instance.
+    pub memory_mb: u32,
+    /// What the game's DataStores may hold.
+    pub datastore_mb: u32,
 }
 
 /// Lobby → shard.
@@ -125,6 +142,13 @@ pub enum LobbyMsg {
     /// pending live update recorded in Postgres; other instances keep their
     /// version until they end.
     ApplyPublish { game: GameId, version: u32 },
+    /// Sent after every `Hello`: script limits by the owner's rank, applied
+    /// when an instance's scripts (re)start.
+    RankQuotas {
+        /// For owners without a rank row, or with a rank not listed.
+        default: RankQuota,
+        ranks: Vec<(String, RankQuota)>,
+    },
 }
 
 pub fn encode_frame<T: Serialize>(msg: &T) -> io::Result<Vec<u8>> {
@@ -212,6 +236,12 @@ mod tests {
                 message: "x".repeat(10_000),
             },
             ShardMsg::DraftSaved { request: 4, ok: false },
+            ShardMsg::Report {
+                game: GameId(5),
+                version: Some(2),
+                reporter: Uuid::from_u128(7),
+                reason: "griefing".into(),
+            },
         ];
         let (mut a, mut b) = tokio::io::duplex(64);
         let writer = {
@@ -258,6 +288,19 @@ mod tests {
         for msg in [
             LobbyMsg::SaveDraft { game: GameId(3), request: 8 },
             LobbyMsg::ApplyPublish { game: GameId(3), version: 2 },
+            LobbyMsg::RankQuotas {
+                default: RankQuota {
+                    memory_mb: 64,
+                    datastore_mb: 16,
+                },
+                ranks: vec![(
+                    "plus".into(),
+                    RankQuota {
+                        memory_mb: 96,
+                        datastore_mb: 32,
+                    },
+                )],
+            },
         ] {
             let got: LobbyMsg = read_frame(&mut encode_frame(&msg).unwrap().as_slice()).await.unwrap().unwrap();
             assert_eq!(got, msg);

@@ -1,0 +1,15 @@
+# TLS in front of the lobby's web script editor. Replace the hostname (and
+# `editor_url` in gamehost-*.toml to match); Caddy gets the certificate.
+edit.example.net {
+	encode zstd gzip
+	# The editor is the only public HTTP surface; metrics stay on loopback.
+	reverse_proxy 127.0.0.1:8081
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+	log {
+		output file /var/log/caddy/edit.log
+	}
+}

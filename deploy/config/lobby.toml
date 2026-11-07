@@ -5,6 +5,54 @@ gate_api = "http://127.0.0.1:8080"
 # Vanilla world save built for the lobby (must contain `region/`).
 world = "/var/lib/minimodes/lobby-world"
 keep_loaded_radius = 8
+# Prometheus scrapes this (loopback only).
+metrics_bind = "127.0.0.1:9101"
+
+# The web script editor; Caddy serves it over HTTPS (deploy/caddy/Caddyfile).
+[web]
+bind = "127.0.0.1:8081"
+secure_cookies = true
+
+[moderation]
+# Open reports from different players that hold a game for review.
+hold_at_reports = 5
+# Days of script text kept for moderators.
+text_log_days = 30
+
+# Limits by rank. Grant with `/rank set <player> <rank>` (admins), or for the
+# first admin: `lobby /etc/minimodes/lobby.toml rank set <player> admin`.
+[ranks.member]
+map_size = 128
+max_drafts = 3
+memory_mb = 64
+datastore_mb = 16
+
+[ranks.plus]
+map_size = 256
+max_drafts = 6
+memory_mb = 96
+datastore_mb = 32
+
+[ranks.creator]
+map_size = 512
+max_drafts = 12
+memory_mb = 128
+datastore_mb = 64
+
+[ranks.moderator]
+map_size = 256
+max_drafts = 6
+memory_mb = 96
+datastore_mb = 32
+moderator = true
+
+[ranks.admin]
+map_size = 512
+max_drafts = 12
+memory_mb = 128
+datastore_mb = 64
+moderator = true
+admin = true
 
 [spawn]
 x = 0.5

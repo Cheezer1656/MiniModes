@@ -1237,3 +1237,152 @@ pub async fn data(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result<()
     println!("data scenario passed");
     Ok(())
 }
+
+const MOD_SCRIPT: &str = r#"
+game.Players.PlayerAdded:Connect(function(player)
+    player:SendMessage("Welcome to Mod Test")
+    player:Give(Item.new("stick", { Name = "Zap Wand", Lore = { "Zaps things" } }))
+end)
+"#;
+
+/// Fetches a `/metrics` page and checks it has each of `names`.
+async fn expect_metrics(addr: &str, names: &[&str]) -> anyhow::Result<()> {
+    let body = reqwest::get(format!("http://{addr}/metrics")).await?.error_for_status()?.text().await?;
+    for name in names {
+        anyhow::ensure!(body.contains(name), "{addr}/metrics has no {name}:\n{body}");
+    }
+    println!("  {addr}/metrics has {}", names.join(", "));
+    Ok(())
+}
+
+/// Moderation: a report from a game and one from the lobby put a game on
+/// hold (the dev lobby holds at 2), a moderator reviews it in `/mod` (reports,
+/// script text), clears it, then bans the creator, which stops the game;
+/// `/rank set` and the metrics endpoints. Needs the lobby, a gamehost and
+/// Postgres, with the dev configs.
+pub async fn moderation(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result<()> {
+    let secret = std::env::var("MINIMODES_VELOCITY_SECRET").context("MINIMODES_VELOCITY_SECRET must be set")?;
+    let db = mm_db::connect(&mm_db::url_from_env()?, 2).await?;
+    let mut gate = mock_gate::start(gate_bind, lobby).await?;
+    wait_for_network(&gate, lobby).await?;
+    let pid = std::process::id() % 100_000;
+    let (owner, game) = (format!("o{pid}"), format!("Mod Test {pid}"));
+    let (moderator, a, b) = (format!("mod{pid}"), format!("ra{pid}"), format!("rb{pid}"));
+
+    let mut owner_bot = create_kind(lobby, &owner, &game, &secret, OPEN_WORLD).await?;
+    let id = mm_db::owned_games(&db, bot_uuid(&owner))
+        .await?
+        .iter()
+        .find(|g| g.name == game)
+        .context("created game not in the database")?
+        .id;
+    mm_db::put_draft_file(&db, id, "main.luau", MOD_SCRIPT, None).await?;
+    publish_game(&mut owner_bot, &game, None).await?;
+
+    // The rank is read when the account loads, so grant it before joining.
+    mm_db::player_joined(&db, bot_uuid(&moderator), &moderator).await?;
+    mm_db::moderation::set_rank(&db, bot_uuid(&moderator), Some("admin"), None).await?;
+    let mut staff = lobby_bot(lobby, &moderator, &secret).await?;
+
+    println!("== a player reports the game from inside it");
+    let lobby_a = lobby_bot(lobby, &a, &secret).await?;
+    let mut alice = play(&mut gate, lobby_a, &a, &game, &secret).await?;
+    expect_chat(&mut alice, "Welcome to Mod Test").await?;
+    alice.command("report").await?;
+    expect_chat(&mut alice, "Usage").await?;
+    alice.command("report spams the chat").await?;
+    expect_chat(&mut alice, "report was sent").await?;
+    expect_chat(&mut staff, "reported (1 open)").await?;
+
+    println!("== another reports it from the browser; two reports hold it");
+    let mut bob = lobby_bot(lobby, &b, &secret).await?;
+    bob.command("mod").await?;
+    expect_chat(&mut bob, "Only moderators").await?;
+    let (idx, _) = find_in_browser(&mut bob, &game).await?;
+    bob.shift_click(idx).await?;
+    let info = expect_menu(&mut bob, &game).await?;
+    anyhow::ensure!(slot(&info, 44).contains("Report"), "no report button: {}", slot(&info, 44));
+    bob.click(44, 0).await?;
+    expect_chat(&mut bob, "Why are you reporting").await?;
+    bob.chat("bad words everywhere").await?;
+    expect_chat(&mut bob, "report was sent").await?;
+    expect_chat(&mut staff, "held for review after 2 reports").await?;
+    bob.select_hotbar(0).await?;
+    bob.use_item().await?;
+    let browser = expect_menu(&mut bob, "Game Browser").await?;
+    anyhow::ensure!(!browser.iter().any(|i| i.contains(&game)), "held game still listed");
+    let mut owner_games = mm_db::owned_games(&db, bot_uuid(&owner)).await?;
+    anyhow::ensure!(owner_games.pop().and_then(|g| g.hold).as_deref() == Some("review"), "not held in the database");
+
+    println!("== the moderator reviews it");
+    staff.command("mod").await?;
+    let queue = expect_menu(&mut staff, "Moderation Queue").await?;
+    let idx = queue.iter().position(|i| i.contains(&game)).with_context(|| format!("not queued: {queue:?}"))?;
+    anyhow::ensure!(queue[idx].contains("2 open report"), "queue entry: {}", queue[idx]);
+    staff.click(idx as i16, 0).await?;
+    let review = expect_menu(&mut staff, "Review:").await?;
+    let status = slot(&review, 4);
+    anyhow::ensure!(status.contains("On hold") && status.contains("2 reports"), "review: {status}");
+    staff.click(19, 0).await?;
+    expect_chat(&mut staff, "bad words everywhere").await?;
+    expect_chat(&mut staff, "spams the chat").await?;
+    // The shard writes the text log every two seconds.
+    idle(&mut staff, Duration::from_secs(3)).await?;
+    staff.click(20, 0).await?;
+    expect_chat(&mut staff, "Welcome to Mod Test").await?;
+    let item = expect_chat(&mut staff, "Zap Wand").await?;
+    anyhow::ensure!(item.contains("Zaps things") && item.contains(&a), "item line: {item}");
+
+    println!("clear it: back in the browser");
+    staff.click(21, 0).await?;
+    expect_chat(&mut staff, "Cleared").await?;
+    let review = expect_menu(&mut staff, "Review:").await?;
+    anyhow::ensure!(slot(&review, 4).contains("Listed"), "after clearing: {}", slot(&review, 4));
+    find_in_browser(&mut bob, &game).await?;
+
+    println!("== ban the creator: the game stops and they can't build");
+    staff.click(25, 0).await?;
+    expect_chat(&mut staff, "Shift-click").await?;
+    staff.shift_click(25).await?;
+    expect_chat(&mut staff, "from creating until lifted").await?;
+    expect_chat(&mut owner_bot, "You were banned from creating games").await?;
+    let call = expect_connect(&mut gate, &a, "lobby").await?;
+    println!("  {} sent to {}", call.player, call.server);
+    drop(alice);
+    idle(&mut owner_bot, Duration::from_millis(500)).await?;
+    owner_bot.select_hotbar(1).await?;
+    owner_bot.use_item().await?;
+    let mine = expect_menu(&mut owner_bot, "My Games").await?;
+    let idx = mine.iter().position(|i| i.contains(&game)).context("game gone from My Games")?;
+    anyhow::ensure!(mine[idx].contains("Under moderator review"), "hold not shown: {}", mine[idx]);
+    owner_bot.click(idx as i16, 0).await?;
+    expect_chat(&mut owner_bot, "banned from creating games").await?;
+    anyhow::ensure!(mm_db::editor::role(&db, id, bot_uuid(&owner)).await?.is_none(), "banned owner can still edit");
+
+    staff.command(&format!("creatorunban {owner}")).await?;
+    expect_chat(&mut staff, "Lifted").await?;
+    expect_chat(&mut owner_bot, "ban was lifted").await?;
+
+    println!("== ranks");
+    staff.command(&format!("rank set {b} nonsense")).await?;
+    expect_chat(&mut staff, "No rank `nonsense`").await?;
+    staff.command(&format!("rank set {b} plus")).await?;
+    expect_chat(&mut staff, "is now").await?;
+    expect_chat(&mut bob, "Your rank is now").await?;
+    idle(&mut bob, Duration::from_millis(500)).await?;
+    bob.command("rank").await?;
+    expect_chat(&mut bob, "256×256 maps").await?;
+    bob.command(&format!("rank set {b} admin")).await?;
+    expect_chat(&mut bob, "Usage").await?;
+
+    println!("== metrics");
+    expect_metrics("127.0.0.1:9101", &["mm_lobby_players", "mm_shard_tick_p99_ms{shard=\"1\"", "mm_held_games"]).await?;
+    expect_metrics(
+        "127.0.0.1:9111",
+        &["mm_tick_ms{quantile=\"0.99\"}", "mm_instances{kind=\"open_world\"}", "mm_script_text_logged_total"],
+    )
+    .await?;
+
+    println!("moderation scenario passed");
+    Ok(())
+}

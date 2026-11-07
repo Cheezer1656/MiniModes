@@ -1,0 +1,23 @@
+groups:
+  - name: minimodes
+    rules:
+      - alert: ProcessDown
+        expr: up{job=~"minimodes-.*"} == 0
+        for: 1m
+        annotations:
+          summary: "{{ $labels.process }} isn't answering /metrics"
+      - alert: ShardMissing
+        expr: mm_shards_connected < 2
+        for: 2m
+        annotations:
+          summary: "Only {{ $value }} game-host shard(s) connected to the lobby"
+      - alert: SlowTicks
+        expr: mm_tick_ms{quantile="0.99"} > 40
+        for: 5m
+        annotations:
+          summary: "{{ $labels.process }} p99 tick is {{ $value }} ms (budget 50)"
+      - alert: ReportsPiling
+        expr: mm_held_games > 0
+        for: 12h
+        annotations:
+          summary: "{{ $value }} game(s) held for review for over 12 hours (/mod)"

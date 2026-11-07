@@ -5,26 +5,26 @@ use std::sync::Arc;
 
 use chunkedge::item::ItemComponent;
 use chunkedge::prelude::*;
-use mm_proto::{GameId, GameKind, GameSummary, LiveUpdate};
+use mm_proto::{GameId, GameKind, GameSummary, Hold, LiveUpdate};
 use mm_ui::{Menu, icon};
 
 use crate::catalog::{BrowserTab, GameCatalog, PlayerGames};
 
-const ROWS: u8 = 6;
-const GRID: [u16; 28] = [
+pub(crate) const ROWS: u8 = 6;
+pub(crate) const GRID: [u16; 28] = [
     10, 11, 12, 13, 14, 15, 16, //
     19, 20, 21, 22, 23, 24, 25, //
     28, 29, 30, 31, 32, 33, 34, //
     37, 38, 39, 40, 41, 42, 43,
 ];
-const PER_PAGE: usize = GRID.len();
-const EMPTY_SLOT: u16 = 22;
+pub(crate) const PER_PAGE: usize = GRID.len();
+pub(crate) const EMPTY_SLOT: u16 = 22;
 
-const PREV: u16 = 45;
+pub(crate) const PREV: u16 = 45;
 const SEARCH: u16 = 48;
-const CLOSE: u16 = 49;
+pub(crate) const CLOSE: u16 = 49;
 const SECONDARY: u16 = 50;
-const NEXT: u16 = 53;
+pub(crate) const NEXT: u16 = 53;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LobbyAction {
@@ -41,6 +41,10 @@ pub enum LobbyAction {
     GameInfo(GameId),
     ToggleFavorite(GameId),
     Rate { game: GameId, stars: u8 },
+    /// Prompt for a reason in chat, then report the game.
+    ReportGame(GameId),
+    /// Moderation menus (see `moderation`).
+    Mod(crate::moderation::ModAction),
     /// Join one of your own games' draft to build (right click: manage it).
     EditDraft(GameId),
     /// Build, publish, settings and play for one of your games.
@@ -163,6 +167,11 @@ fn draft_icon(game: &GameSummary, shared: bool) -> ItemStack {
         0 => "§8Not published yet".to_owned(),
         v => format!("§7Published §fv{v}"),
     }));
+    match game.hold {
+        Some(Hold::Review) => lore.push(Text::text("§6Under moderator review: not listed")),
+        Some(Hold::Removed) => lore.push(Text::text("§cTaken down by moderators")),
+        None => {}
+    }
     lore.extend([
         Text::default(),
         Text::text("§eClick to build"),
@@ -494,6 +503,11 @@ fn game_info(catalog: &GameCatalog, player: &PlayerGames, game: &GameSummary) ->
             tab: BrowserTab::Popular,
             page: 0,
         },
+    );
+    menu.button(
+        44,
+        icon(ItemKind::RedDye, "§cReport", [Text::text("§7Tell the moderators about a problem")]),
+        LobbyAction::ReportGame(game.id),
     );
     menu.fill_empty_where(&icon(ItemKind::GrayStainedGlassPane, " ", []), |_| true);
     menu

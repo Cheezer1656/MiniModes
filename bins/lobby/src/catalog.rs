@@ -39,12 +39,25 @@ impl GameCatalog {
         }
     }
 
-    /// Adds a newly published game or replaces its listing.
+    /// Adds a newly published game or replaces its listing. A game on
+    /// moderation hold is taken out instead.
     pub fn upsert(&mut self, game: GameSummary) {
+        if game.hold.is_some() || game.version == 0 {
+            self.remove(game.id);
+            return;
+        }
         match self.games.iter_mut().find(|g| g.id == game.id) {
             Some(existing) => *existing = game,
             None => self.games.push(game),
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.games.len()
+    }
+
+    pub fn remove(&mut self, id: GameId) {
+        self.games.retain(|g| g.id != id);
     }
 
     /// A player rated the game; `mean` and `count` are its new totals.
@@ -174,6 +187,8 @@ pub struct PlayerGames {
     /// Other players' games this player may edit.
     pub shared: Vec<GameSummary>,
     pub rank: Option<String>,
+    /// While set, the player can't create, build, edit scripts or publish.
+    pub creator_ban: Option<mm_db::moderation::Ban>,
     /// Open worlds among `owned` that save player state.
     pub player_saves: HashSet<GameId>,
     /// Set once `owned` and `rank` have loaded.
@@ -246,6 +261,7 @@ mod tests {
             rating: rating.map(|r| r.0),
             ratings: rating.map_or(0, |r| r.1),
             plays: 0,
+            hold: None,
         }
     }
 
@@ -268,6 +284,19 @@ mod tests {
         assert_eq!(ids(&catalog.search("mine out")), [2]);
         assert!(catalog.search("  ").is_empty());
         assert!(catalog.search("zzz").is_empty());
+    }
+
+    #[test]
+    fn held_games_leave_the_catalog() {
+        let mut catalog = GameCatalog::new(vec![game(1, "Bridge", "a", "", None), game(2, "Parkour", "b", "", None)]);
+        let mut held = game(1, "Bridge", "a", "", None);
+        held.hold = Some(mm_proto::Hold::Review);
+        catalog.upsert(held);
+        assert!(catalog.get(GameId(1)).is_none());
+        catalog.upsert(game(1, "Bridge v2", "a", "", None));
+        assert_eq!(catalog.get(GameId(1)).unwrap().name, "Bridge v2");
+        catalog.remove(GameId(2));
+        assert_eq!(catalog.len(), 1);
     }
 
     #[test]

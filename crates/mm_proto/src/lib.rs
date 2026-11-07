@@ -46,6 +46,34 @@ pub struct GameSummary {
     pub ratings: u32,
     /// Distinct players who ever joined it.
     pub plays: u32,
+    /// Set while moderators hold the game out of the browser.
+    pub hold: Option<Hold>,
+}
+
+/// Why a game is out of the browser.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Hold {
+    /// Waiting for a moderator (reported, or its creator was banned).
+    Review,
+    /// Taken down: it can't be played or republished.
+    Removed,
+}
+
+impl Hold {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Review => "review",
+            Self::Removed => "removed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "review" => Self::Review,
+            "removed" => Self::Removed,
+            _ => return None,
+        })
+    }
 }
 
 /// How a publish reaches a persistent world that already exists. Other

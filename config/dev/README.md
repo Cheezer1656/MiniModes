@@ -119,10 +119,12 @@ Then it publishes a persistent world and checks:
 Scripts keep data across instances with `DataStoreService` (`GetDataStore`,
 `GetOrderedDataStore`; see the type definitions). Values are stored as JSON
 in Postgres per game, and a draft's data is kept apart from the published
-game's. The shard's `[scripts]` settings cap each game's storage
-(`datastore_quota_mb`), single values (`datastore_value_kb`) and the request
-rate (`datastore_requests_per_minute` plus `datastore_requests_per_player`
-for each player).
+game's. Each game's storage cap comes from its owner's rank (`datastore_mb`,
+see below). The shard's `[scripts]` settings cap single values
+(`datastore_value_kb`) and the request rate (`datastore_requests_per_minute`
+plus `datastore_requests_per_player` for each player). Its
+`datastore_quota_mb` and `memory_mb` apply only until the lobby sends the
+rank quotas.
 
 The lobby saves favorites (right-click a game), plays and ratings. A
 player coming back from a game they haven't rated gets a clickable ★
@@ -134,3 +136,55 @@ descriptions.
 `mmbot data` (same setup as `drafts`) covers both: script data across
 visits and in the draft, rating, favorites, recent games and search after a
 reconnect.
+
+## Moderation, ranks and metrics
+
+Ranks come from the lobby's `[ranks.<name>]` tables: map size, game count,
+script memory and DataStore quota, plus `moderator` and `admin`. Players
+without a `ranks` row are `member`. The lobby sends shards the memory and
+DataStore quotas; they apply when an instance's scripts (re)start. Grant
+the first admin from the command line (they must have joined once):
+
+```sh
+cargo run -p lobby -- config/dev/lobby.toml rank set <player> admin
+```
+
+After that, `/rank set <player> <rank|default>` works in game. `/rank`
+shows your rank; moderators can look up someone else's with `/rank <player>`.
+
+- **Reports:** `/report <reason>` while playing, or the **Report** button
+  in a game's details (shift-click it in the browser). One open report per
+  player per game. At `[moderation] hold_at_reports` (2 in dev) the game is
+  held for review: it leaves the browser and moderators in the lobby are
+  told.
+- **`/mod`:** opens the queue (held games, then the most reported) for
+  moderators. `/mod game <id>` opens any game. Its review page has:
+  - the open reports and recent script text, shown in chat;
+  - **Clear**, which resolves the reports and relists the game;
+  - **Hold**;
+  - **Stop instances**;
+  - **Take down** (shift-click), which stops it and blocks republishing;
+  - **Ban creator** (shift-click).
+- **Creator bans:** `/creatorban <player> [<days>d] <reason>` and
+  `/creatorunban <player>`. A banned creator can't create, build, open the
+  editor or publish. Their games are held and stopped.
+- **Audit log:** every chat line, title and action bar scripts send, and
+  every item name, goes to `script_text_log`. Repeats are skipped and each
+  instance is capped at 600 lines a minute. The log is partitioned by day,
+  and the lobby drops days past `text_log_days`. Moderator actions go to
+  `mod_actions`.
+
+With `metrics_bind` set, each process serves Prometheus metrics: lobby
+:9101 and gh-1 :9111 here. These cover tick time, players, shards, and per
+instance the players, script step time and memory, plus the moderation
+backlog. The production Prometheus/Grafana setup is in `deploy/README.md`.
+
+`mmbot moderation` (same setup as `drafts`) checks:
+
+- a report from inside a game and one from the browser holding the game;
+- the queue, the reports and the script text log;
+- clearing the game;
+- banning its creator, which sends the player inside back to the lobby,
+  then unbanning;
+- `/rank set`;
+- both metrics endpoints.

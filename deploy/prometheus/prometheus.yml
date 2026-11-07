@@ -1,0 +1,25 @@
+# Prometheus on the same host, scraping each process's loopback endpoint.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Keep a month; the box has a small disk budget for this.
+# (Set with --storage.tsdb.retention.time=30d on the prometheus command line.)
+
+scrape_configs:
+  - job_name: minimodes-lobby
+    static_configs:
+      - targets: ["127.0.0.1:9101"]
+        labels: { process: lobby }
+  - job_name: minimodes-gamehost
+    static_configs:
+      - targets: ["127.0.0.1:9111"]
+        labels: { process: gh-1 }
+      - targets: ["127.0.0.1:9112"]
+        labels: { process: gh-2 }
+  - job_name: node
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+
+rule_files:
+  - /etc/prometheus/minimodes-alerts.yml

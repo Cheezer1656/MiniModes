@@ -12,6 +12,8 @@
 //!   persistent world; the match flow, player state, idle unload and live updates.
 //! - `mmbot data <lobby_addr> [gate_api_bind]`: DataStores in a published game
 //!   and its draft; ratings, favorites, recent games and search across reconnects.
+//! - `mmbot moderation <lobby_addr> [gate_api_bind]`: reports and holds, the
+//!   `/mod` queue, creator bans, `/rank` and the metrics endpoints.
 //! - `mmbot editor <lobby_addr> [gate_api_bind]`: the web editor: login link,
 //!   file API, hot reload, console stream, history and collaborators.
 //! - `mmbot editor-link <game_id> [editor_url]`: print a sign-in link to the
@@ -62,11 +64,15 @@ async fn main() -> anyhow::Result<()> {
             let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
             scenarios::data(addr, gate).await
         }
+        "moderation" => {
+            let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
+            scenarios::moderation(addr, gate).await
+        }
         "editor" => {
             let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
             scenarios::editor(addr, gate).await
         }
-        other => anyhow::bail!("unknown mode `{other}` (expected join | lobby-ui | handoff | drafts | scripts | games | data | editor)"),
+        other => anyhow::bail!("unknown mode `{other}` (expected join | lobby-ui | handoff | drafts | scripts | games | data | moderation | editor)"),
     }
 }
 

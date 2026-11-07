@@ -15,6 +15,7 @@ use crate::config::{HotbarConfig, MenuName, NpcConfig};
 use crate::join::JoinRequest;
 use crate::library::{FavoriteChanged, RateRequest};
 use crate::menus::{self, LobbyAction};
+use crate::moderation::ModClick;
 use crate::publish::{PlayerSavesSetting, PublishRequest};
 use crate::world::LobbyLayer;
 
@@ -106,6 +107,7 @@ fn handle_actions(
     mut settings: MessageWriter<PlayerSavesSetting>,
     mut favorites: MessageWriter<FavoriteChanged>,
     mut rates: MessageWriter<RateRequest>,
+    mut mod_clicks: MessageWriter<ModClick>,
 ) {
     for UiAction { client: player, action, source } in actions.read() {
         let Ok((mut client, uuid, mut games, view)) = players.get_mut(*player) else {
@@ -170,6 +172,10 @@ fn handle_actions(
             LobbyAction::EditDraft(id) => {
                 commands.close_menu(*player);
                 commands.entity(*player).remove::<CurrentView>();
+                if let Some(ban) = &games.creator_ban {
+                    client.send_chat_message(crate::moderation::ban_message(ban));
+                    continue;
+                }
                 joins.write(JoinRequest {
                     client: *player,
                     game: *id,
@@ -186,6 +192,24 @@ fn handle_actions(
                     on,
                 });
                 LobbyAction::GameInfo(*id)
+            }
+            LobbyAction::ReportGame(id) => {
+                commands.close_menu(*player);
+                commands.entity(*player).remove::<CurrentView>();
+                commands
+                    .entity(*player)
+                    .insert(ChatPrompt::new(&server, PromptPurpose::Report(*id)));
+                let name = catalog.get(*id).map_or("this game", |g| g.name.as_str());
+                client.send_chat_message(format!("§cWhy are you reporting §f{name}§c? §7Type it in chat (or \"cancel\")"));
+                continue;
+            }
+            LobbyAction::Mod(action) => {
+                mod_clicks.write(ModClick {
+                    client: *player,
+                    action: action.clone(),
+                    shift: matches!(source, UiSource::Menu { shift: true, .. }),
+                });
+                continue;
             }
             LobbyAction::Rate { game, stars } => {
                 rates.write(RateRequest {

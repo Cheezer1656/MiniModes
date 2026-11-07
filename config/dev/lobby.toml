@@ -4,11 +4,16 @@ max_players = 100
 coordinator_bind = "127.0.0.1:25700"
 gate_api = "http://127.0.0.1:8090"
 keep_loaded_radius = 4
+metrics_bind = "127.0.0.1:9101"
 
 # The web script editor. In production Caddy terminates TLS in front of it.
 [web]
 bind = "127.0.0.1:8081"
 secure_cookies = false
+
+# Two reports put a game on hold, so it's quick to test.
+[moderation]
+hold_at_reports = 2
 
 [spawn]
 x = 0.5

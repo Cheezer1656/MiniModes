@@ -10,6 +10,7 @@ max_edit_volume = 1000000
 edit_blocks_per_tick = 20000
 # Where `/script edit` links point (the lobby's web editor).
 editor_url = "http://127.0.0.1:8081"
+metrics_bind = "127.0.0.1:9111"
 
 [threads]
 tokio_workers = 1

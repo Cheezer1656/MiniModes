@@ -1,7 +1,7 @@
 //! The lobby's view of published games and live player counts. It's filled
 //! from the database and shard heartbeats; menus only read it.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use chunkedge::prelude::*;
 use mm_proto::{GameId, GameLiveStats, GameSummary};
@@ -31,6 +31,14 @@ impl GameCatalog {
         Self {
             games,
             live: HashMap::new(),
+        }
+    }
+
+    /// Adds a newly published game or replaces its listing.
+    pub fn upsert(&mut self, game: GameSummary) {
+        match self.games.iter_mut().find(|g| g.id == game.id) {
+            Some(existing) => *existing = game,
+            None => self.games.push(game),
         }
     }
 
@@ -93,6 +101,8 @@ pub struct PlayerGames {
     /// Other players' games this player may edit.
     pub shared: Vec<GameSummary>,
     pub rank: Option<String>,
+    /// Open worlds among `owned` that save player state.
+    pub player_saves: HashSet<GameId>,
     /// Set once `owned` and `rank` have loaded.
     pub loaded: bool,
 }

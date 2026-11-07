@@ -15,7 +15,7 @@ use mm_world::BlockMirror;
 use crate::api;
 use crate::bundle::{Bundle, ENTRY};
 use crate::host::{Host, Resume, TICKS_PER_SECOND, host, thread_key};
-use crate::io::{Event, Limits, Snapshot, StepOutput};
+use crate::io::{Event, GameInfo, Limits, Snapshot, StepOutput};
 
 /// How long past its slice a thread that can't be yielded (inside a
 /// metamethod, a `table.sort` comparator, or a coroutine of its own) may run
@@ -92,7 +92,7 @@ pub struct Vm {
 impl Vm {
     /// Compiles the bundle and sets up the sandbox. Runs no script code: the
     /// entry module starts on the first step, under the budget.
-    pub fn new(bundle: Bundle, limits: Limits, blocks: BlockMirror) -> Result<Self, String> {
+    pub fn new(bundle: Bundle, limits: Limits, blocks: BlockMirror, info: GameInfo) -> Result<Self, String> {
         if !bundle.has_entry() {
             return Err(format!("no `{ENTRY}`"));
         }
@@ -108,7 +108,7 @@ impl Vm {
         let lua = Lua::new_with(libs, LuaOptions::new()).map_err(|e| e.to_string())?;
         let memory = limits.memory;
         let budget = Arc::new(Budget::new());
-        lua.set_app_data(Host::new(limits, blocks));
+        lua.set_app_data(Host::new(limits, blocks, info));
         let setup = || -> mlua::Result<Function> {
             api::install(&lua, &bundle)?;
             lua.sandbox(true)?;
@@ -191,9 +191,12 @@ impl Vm {
             runnable: host.sched.has_ready(),
             next_timer: host.sched.next_timer(),
             fatal: None,
+            closed: false,
         };
         let max_streak = host.limits.max_overrun_steps;
+        let closing = host.closing.clone();
         drop(host);
+        out.closed = closing.is_some_and(|threads| threads.iter().all(|t| t.status() != ThreadStatus::Resumable));
         self.overrun_streak = if overran { self.overrun_streak + 1 } else { 0 };
         if self.overrun_streak > max_streak {
             out.fatal = Some(format!(

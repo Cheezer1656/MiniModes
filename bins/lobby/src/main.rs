@@ -5,6 +5,7 @@ mod config;
 mod coordinator;
 mod join;
 mod menus;
+mod publish;
 mod ui;
 mod web;
 mod world;
@@ -31,7 +32,8 @@ fn main() -> anyhow::Result<()> {
         account::DEFAULT_RANK
     );
     let web = config.web.clone();
-    let catalog = GameCatalog::new(config.games.iter().map(|g| g.summary()).collect());
+    let listed = runtime.block_on(mm_db::listed_games(&db))?;
+    let catalog = GameCatalog::new(listed.iter().map(|g| g.summary()).collect());
 
     let mut app = App::new();
     backend.insert_into(&mut app);
@@ -60,6 +62,7 @@ fn main() -> anyhow::Result<()> {
             ui::LobbyUiPlugin,
             chat::ChatPlugin,
             join::JoinPlugin,
+            publish::PublishPlugin,
             web::WebPlugin { config: web },
         ))
         .run();

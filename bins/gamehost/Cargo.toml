@@ -8,6 +8,8 @@ publish.workspace = true
 anyhow.workspace = true
 bevy_tasks = { version = "0.19.1", default-features = false }
 chunkedge.workspace = true
+chunkedge_binary.workspace = true
+postcard.workspace = true
 mm_core.workspace = true
 mm_db.workspace = true
 mm_world.workspace = true

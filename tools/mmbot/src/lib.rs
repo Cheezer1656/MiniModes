@@ -53,6 +53,8 @@ pub enum BotEvent {
     /// Full contents of a window: each slot's item name (empty for no item or no name).
     ScreenContent { window_id: i32, items: Vec<String> },
     ScreenClosed { window_id: i32 },
+    /// One slot of a window changed (window 0 is the player's inventory).
+    SlotChanged { window_id: i32, slot: i16, item: String },
     EntitySpawned { entity_id: i32, kind: i32, pos: DVec3 },
     Disconnected(String),
 }
@@ -459,6 +461,14 @@ impl Bot {
                 return Ok(Some(BotEvent::ScreenContent {
                     window_id: pkt.window_id.0,
                     items,
+                }));
+            }
+            play::ContainerSetSlotS2c::ID => {
+                let pkt: play::ContainerSetSlotS2c = frame.decode()?;
+                return Ok(Some(BotEvent::SlotChanged {
+                    window_id: pkt.window_id.0,
+                    slot: pkt.slot_idx,
+                    item: item_name(&pkt.slot_data),
                 }));
             }
             play::ContainerCloseS2c::ID => {

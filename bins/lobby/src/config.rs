@@ -5,7 +5,6 @@ use chunkedge::prelude::*;
 use std::collections::HashMap;
 
 use mm_core::ThreadConfig;
-use mm_proto::{GameId, GameKind, GameSummary};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -34,57 +33,6 @@ pub struct LobbyConfig {
     pub ranks: HashMap<String, crate::account::RankLimits>,
     /// The web script editor; unset disables it.
     pub web: Option<crate::web::WebConfig>,
-    /// Games listed without a database (development only).
-    #[serde(default, rename = "game")]
-    pub games: Vec<GameConfig>,
-}
-
-#[derive(Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct GameConfig {
-    pub id: i64,
-    pub name: String,
-    pub creator: String,
-    #[serde(default)]
-    pub description: String,
-    pub icon: String,
-    pub kind: GameKindConfig,
-    pub max_players: u32,
-    #[serde(default)]
-    pub featured: bool,
-}
-
-#[derive(Deserialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-pub enum GameKindConfig {
-    Match,
-    OpenWorld,
-    PersistentWorld,
-}
-
-impl GameConfig {
-    pub fn summary(&self) -> GameSummary {
-        GameSummary {
-            id: GameId(self.id),
-            name: self.name.clone(),
-            creator: self.creator.clone(),
-            description: self.description.clone(),
-            icon: self.icon.clone(),
-            kind: match self.kind {
-                GameKindConfig::Match => GameKind::Match,
-                GameKindConfig::OpenWorld => GameKind::OpenWorld {
-                    persistent_world: false,
-                },
-                GameKindConfig::PersistentWorld => GameKind::OpenWorld {
-                    persistent_world: true,
-                },
-            },
-            max_players: self.max_players,
-            featured: self.featured,
-            published_at: 0,
-            rating: None,
-        }
-    }
 }
 
 #[derive(Resource, Deserialize, Clone, Copy)]

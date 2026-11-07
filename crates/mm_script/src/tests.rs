@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use chunkedge::prelude::*;
 use mm_world::{BlockMirror, Bounds};
 
-use crate::io::{Command, Event, Limits, PlayerSnap, Snapshot, StepOutput};
+use crate::io::{Command, Event, GameInfo, Limits, MatchPhase, PlayerSnap, Snapshot, StepOutput};
 use crate::{Bundle, Vm};
 
 fn limits() -> Limits {
@@ -15,8 +15,12 @@ fn limits() -> Limits {
 }
 
 fn vm_with(files: &[(&str, &str)], limits: Limits) -> Vm {
+    vm_info(files, limits, GameInfo::default())
+}
+
+fn vm_info(files: &[(&str, &str)], limits: Limits, info: GameInfo) -> Vm {
     let bundle = Bundle::new(files.iter().map(|(p, s)| (p.to_string(), s.to_string()))).unwrap();
-    Vm::new(bundle, limits, BlockMirror::flat(Bounds::square(32), 64)).unwrap()
+    Vm::new(bundle, limits, BlockMirror::flat(Bounds::square(32), 64), info).unwrap()
 }
 
 fn vm(main: &str) -> Vm {
@@ -186,7 +190,7 @@ fn require_resolves_caches_and_detects_cycles() {
 #[test]
 fn syntax_errors_fail_loading() {
     let bundle = Bundle::new([("main.luau".into(), "local = 1".into())]).unwrap();
-    let err = Vm::new(bundle, limits(), BlockMirror::flat(Bounds::square(32), 64)).err().unwrap();
+    let err = Vm::new(bundle, limits(), BlockMirror::flat(Bounds::square(32), 64), GameInfo::default()).err().unwrap();
     assert!(err.starts_with("main.luau:"), "{err}");
 }
 
@@ -329,4 +333,91 @@ fn runtime_errors_are_reported_with_the_module() {
     );
     let out = messages(&step(&mut vm, 0, &[], vec![]));
     assert!(out[0].contains("boom.luau:2"), "{}", out[0]);
+}
+
+#[test]
+fn match_api_follows_the_host() {
+    let main = r#"
+        assert(game.IsDraft == false and game.Version == 3 and game.GameId == 7)
+        game.Match.MinPlayers = 1
+        game.Match.CountdownSeconds = 3
+        game.Match.Starting:Connect(function(s) print("starting " .. s .. " " .. game.Match.State) end)
+        game.Match.Started:Connect(function()
+            print("started")
+            game.Match:End(game.Players:GetPlayers())
+        end)
+        game.Match.Ended:Connect(function(winners) print("winner " .. winners[1].Name) end)
+    "#;
+    let info = GameInfo {
+        game_id: 7,
+        version: Some(3),
+        max_players: 4,
+        ..GameInfo::default()
+    };
+    let mut vm = vm_info(&[("main.luau", main)], limits(), info);
+    let out = step(&mut vm, 1, &[player(1, [0.0; 3])], vec![join(1, "Ann")]);
+    assert!(messages(&out).is_empty(), "{:?}", messages(&out));
+    assert!(out.commands.iter().any(|c| matches!(c, Command::MatchSettings { min_players: 1, countdown: 3 })));
+
+    let starting = Event::Match {
+        phase: MatchPhase::Starting,
+        seconds: 3,
+        winners: vec![],
+    };
+    let out = step(&mut vm, 2, &[player(1, [0.0; 3])], vec![starting]);
+    assert_eq!(messages(&out), ["starting 3 Starting"]);
+    let started = Event::Match {
+        phase: MatchPhase::Started,
+        seconds: 0,
+        winners: vec![],
+    };
+    let out = step(&mut vm, 3, &[player(1, [0.0; 3])], vec![started]);
+    assert_eq!(messages(&out), ["started"]);
+    assert!(out.commands.iter().any(|c| matches!(c, Command::EndMatch { winners } if winners == &[1])));
+    let ended = Event::Match {
+        phase: MatchPhase::Ended,
+        seconds: 0,
+        winners: vec![1],
+    };
+    let out = step(&mut vm, 4, &[player(1, [0.0; 3])], vec![ended]);
+    assert_eq!(messages(&out), ["winner Ann"]);
+}
+
+#[test]
+fn open_worlds_have_no_match_and_see_last_shutdown() {
+    let info = GameInfo {
+        kind: mm_proto::GameKind::OpenWorld {
+            persistent_world: true,
+        },
+        version: Some(1),
+        last_shutdown: Some(1_700_000_000),
+        ..GameInfo::default()
+    };
+    let main = "print(tostring(game.Match), game.LastShutdown)";
+    let mut vm = vm_info(&[("main.luau", main)], limits(), info);
+    assert_eq!(messages(&step(&mut vm, 1, &[], vec![])), ["nil 1700000000"]);
+}
+
+#[test]
+fn bind_to_close_runs_until_callbacks_return() {
+    let main = r#"
+        game:BindToClose(function()
+            print("closing")
+            task.wait(0.1)
+            print("saved")
+        end)
+    "#;
+    let mut closing = vm(main);
+    let out = step(&mut closing, 1, &[], vec![]);
+    assert!(!out.closed);
+    let out = step(&mut closing, 2, &[], vec![Event::Closing]);
+    assert_eq!(messages(&out), ["closing"]);
+    assert!(!out.closed);
+    let out = step(&mut closing, 5, &[], vec![]);
+    assert_eq!(messages(&out), ["saved"]);
+    assert!(out.closed);
+
+    // Nothing bound: closed right away.
+    let mut idle = vm("print('hi')");
+    assert!(step(&mut idle, 1, &[], vec![Event::Closing]).closed);
 }

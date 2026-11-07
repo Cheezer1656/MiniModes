@@ -2,6 +2,7 @@
 //! `game.Rules`, `task`, `Vector3`, `Region`, `Item`, and `require` over the
 //! game's own module tree.
 
+mod game;
 mod player;
 mod signal;
 mod task;
@@ -34,7 +35,12 @@ struct Modules {
 }
 
 fn compiler() -> Compiler {
-    Compiler::new().set_optimization_level(1).set_debug_level(1)
+    // `game.Match.State` and friends change at runtime; without this Luau
+    // would resolve such global paths once, when the module loads.
+    Compiler::new()
+        .set_optimization_level(1)
+        .set_debug_level(1)
+        .set_mutable_globals(["game"])
 }
 
 pub fn install(lua: &Lua, bundle: &Bundle) -> mlua::Result<()> {
@@ -79,6 +85,7 @@ pub fn install(lua: &Lua, bundle: &Bundle) -> mlua::Result<()> {
     task::install(lua)?;
     vector::install(lua)?;
     let game = lua.create_table()?;
+    self::game::install(lua, &game)?;
     player::install(lua, &game)?;
     world::install(lua, &game)?;
     globals.set("game", game)
@@ -224,6 +231,8 @@ pub fn dispatch(lua: &Lua, event: Event) -> mlua::Result<()> {
                 None => Ok(()),
             }
         }
+        Event::Match { phase, seconds, winners } => self::game::match_event(lua, phase, seconds, winners),
+        Event::Closing => self::game::closing(lua),
         Event::BlockBroken { player, pos, old } => block_event(lua, player, pos, old, BlockState::AIR, false),
         Event::BlockPlaced { player, pos, old, new } => block_event(lua, player, pos, old, new, true),
     }

@@ -65,3 +65,51 @@ jsDelivr.
 `mmbot editor` (same setup as `drafts`, plus `[web]` and `editor_url`)
 checks the link, the file API and its limits, reload into the running
 draft, the console stream, history, and collaborator access.
+
+## Publishing and game kinds
+
+Right-click a game in My Games for its manage page. **Publish** snapshots
+the draft (its map and scripts) as the next immutable version and lists the
+game in the Game Browser. An open draft saves first. New instances run the
+latest version. Match and open-world instances that are already running
+finish on the version they started with.
+
+- **Match:** players wait for `game.Match.MinPlayers` (default 2), then a
+  countdown runs. Once it starts, no one else can join. After
+  `game.Match:End(winners)` the result shows for 5 seconds and everyone goes
+  back to the lobby. In a draft, `/match start` and `/match end` drive the
+  flow by hand.
+- **Open world:** parallel instances, each starting from the published map.
+- **Persistent world:** one live world (`live_worlds`) that autosaves.
+  - When it's full, or still saving on its way down, joiners wait in a
+    queue (`/leavequeue` leaves it).
+  - Publishing over a live world asks how it should be updated:
+    - **scripts only**;
+    - **scripts + regions**, which copies the draft's `//region add <name>`
+      boxes over the world;
+    - **full reset**, which backs up to `live_world_backups` first.
+  - A running world applies the update in place. Otherwise it applies on the
+    next load.
+
+Open worlds save each player's inventory, position, health, food and game
+mode per game (`player_game_state`). This is on by default; the manage page
+toggles it. State loads before scripts see the player, and saves on leave,
+every 5 minutes, and at shutdown.
+
+Instances unload `idle_unload_secs` after the last player leaves. Before
+unloading they run `game:BindToClose` callbacks (up to 5 seconds), and
+persistent worlds record `game.LastShutdown`.
+
+`mmbot games` (same setup as `drafts`, with `idle_unload_secs = 30`)
+publishes a match and checks:
+
+- the countdown;
+- that a third player gets a new instance once the match has started;
+- `End`, and both players returning to the lobby.
+
+Then it publishes a persistent world and checks:
+
+- a "scripts + regions" update while a player is inside;
+- the player's inventory and position surviving an idle unload, plus
+  `LastShutdown`;
+- a full reset, with its backup.

@@ -157,8 +157,18 @@ pub async fn handoff(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result
     .await
     .context("lobby not listening")?;
 
-    let (alice, alice_instance) = join_game(&mut gate, lobby, "alice", "Test Match", &secret).await?;
-    let (bob, bob_instance) = join_game(&mut gate, lobby, "bob", "Test Match", &secret).await?;
+    let pid = std::process::id() % 100_000;
+    let (match_game, world_game) = (format!("Match {pid}"), format!("Prison {pid}"));
+    let owner = format!("o{pid}");
+    let mut bot = create_kind(lobby, &owner, &match_game, &secret, MATCH).await?;
+    publish_game(&mut bot, &match_game, None).await?;
+    drop(bot);
+    let mut bot = create_kind(lobby, &format!("p{pid}"), &world_game, &secret, PERSISTENT).await?;
+    publish_game(&mut bot, &world_game, None).await?;
+    drop(bot);
+
+    let (alice, alice_instance) = join_game(&mut gate, lobby, "alice", &match_game, &secret).await?;
+    let (bob, bob_instance) = join_game(&mut gate, lobby, "bob", &match_game, &secret).await?;
     anyhow::ensure!(alice_instance == bob_instance, "match players split: {alice_instance} vs {bob_instance}");
     println!("  both players share instance {alice_instance}");
     drop(bob);
@@ -173,8 +183,8 @@ pub async fn handoff(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result
     println!("  back in the lobby");
 
     println!("persistent world: one instance shared by everyone");
-    let (_carol, carol_instance) = join_game(&mut gate, lobby, "carol", "Test Prison", &secret).await?;
-    let (_dave, dave_instance) = join_game(&mut gate, lobby, "dave", "Test Prison", &secret).await?;
+    let (_carol, carol_instance) = join_game(&mut gate, lobby, "carol", &world_game, &secret).await?;
+    let (_dave, dave_instance) = join_game(&mut gate, lobby, "dave", &world_game, &secret).await?;
     anyhow::ensure!(carol_instance == dave_instance, "persistent world split");
 
     println!("unexpected arrival is bounced to the lobby");
@@ -289,6 +299,16 @@ pub async fn drafts(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result<
 /// Joins the lobby as `name` and creates a game called `game` through the
 /// My Games menu.
 async fn create_game(lobby: SocketAddr, name: &str, game: &str, secret: &str) -> anyhow::Result<Bot> {
+    create_kind(lobby, name, game, secret, OPEN_WORLD).await
+}
+
+/// "Create a Game" menu slots.
+const MATCH: i16 = 11;
+const OPEN_WORLD: i16 = 13;
+const PERSISTENT: i16 = 15;
+
+/// Like [`create_game`], picking the kind by its menu slot.
+async fn create_kind(lobby: SocketAddr, name: &str, game: &str, secret: &str, kind: i16) -> anyhow::Result<Bot> {
     println!("{name}: create \"{game}\"");
     let mut bot = Bot::connect_forwarded(lobby, name, secret).await?;
     expect(&mut bot, "lobby spawn", |e| matches!(e, BotEvent::Teleported(_))).await?;
@@ -299,7 +319,7 @@ async fn create_game(lobby: SocketAddr, name: &str, game: &str, secret: &str) ->
     expect_menu(&mut bot, "My Games").await?;
     bot.click(50, 0).await?;
     expect_menu(&mut bot, "Create a Game").await?;
-    bot.click(13, 0).await?;
+    bot.click(kind, 0).await?;
     expect_menu(&mut bot, "Pick an Icon").await?;
     bot.click(10, 0).await?;
     expect_chat(&mut bot, "Type a name").await?;
@@ -447,7 +467,15 @@ async fn open_draft(gate: &mut MockGate, mut bot: Bot, name: &str, game: &str, s
             .position(|i| i.contains(game))
             .with_context(|| format!("{game} not in My Games: {items:?}"))?;
         bot.click(idx as i16, 0).await?;
-        expect_chat(&mut bot, "Opening the draft").await?;
+        let reply = expect(&mut bot, "draft reply", |e| {
+            matches!(e, BotEvent::Chat(m) if m.contains("Opening the draft") || m.contains("still saving"))
+        })
+        .await?;
+        if matches!(&reply, BotEvent::Chat(m) if m.contains("still saving")) {
+            anyhow::ensure!(attempt < 20, "draft never finished saving");
+            idle(&mut bot, Duration::from_secs(1)).await?;
+            continue;
+        }
         let call = expect_connect(gate, name, "gh-").await?;
         let mut shard = Bot::connect_forwarded(call.address.context("shard address")?, name, secret).await?;
         let reply = expect(&mut shard, "draft welcome", |e| {
@@ -788,5 +816,285 @@ pub async fn editor(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result<
     owner.expect(Method::GET, "/session", None, 401).await?;
 
     println!("editor scenario passed");
+    Ok(())
+}
+
+/// From the lobby: right-click `game` in My Games, then Publish (and the
+/// live-update mode at `mode_slot` when the menu asks for one).
+async fn publish_game(bot: &mut Bot, game: &str, mode_slot: Option<i16>) -> anyhow::Result<String> {
+    println!("{}: publish \"{game}\"", bot.name);
+    bot.select_hotbar(1).await?;
+    bot.use_item().await?;
+    let items = expect_menu(bot, "My Games").await?;
+    let idx = items
+        .iter()
+        .position(|i| i.contains(game))
+        .with_context(|| format!("{game} not in My Games: {items:?}"))?;
+    bot.click(idx as i16, 1).await?;
+    let manage = expect_menu(bot, "Manage:").await?;
+    anyhow::ensure!(slot(&manage, 12).contains("Publish"), "no publish button: {manage:?}");
+    bot.click(12, 0).await?;
+    if let Some(mode) = mode_slot {
+        expect_menu(bot, "Publish v").await?;
+        bot.click(mode, 0).await?;
+    }
+    let reply = expect(bot, "publish result", |e| {
+        matches!(e, BotEvent::Chat(m) if m.contains("Published") || m.contains("Couldn't") || m.contains("couldn't"))
+    })
+    .await?;
+    let BotEvent::Chat(msg) = reply else { unreachable!() };
+    anyhow::ensure!(msg.contains("Published"), "publish failed: {msg}");
+    println!("  chat: {msg}");
+    Ok(msg)
+}
+
+/// Joins the lobby and waits to spawn.
+async fn lobby_bot(lobby: SocketAddr, name: &str, secret: &str) -> anyhow::Result<Bot> {
+    let mut bot = Bot::connect_forwarded(lobby, name, secret).await?;
+    expect(&mut bot, "lobby spawn", |e| matches!(e, BotEvent::Teleported(_))).await?;
+    Ok(bot)
+}
+
+/// Back to the lobby with `/lobby` and reconnect there.
+async fn to_lobby(gate: &mut MockGate, mut bot: Bot, name: &str, secret: &str) -> anyhow::Result<Bot> {
+    bot.command("lobby").await?;
+    let call = expect_connect(gate, name, "lobby").await?;
+    drop(bot);
+    let mut bot = Bot::connect_forwarded(call.address.context("lobby address")?, name, secret).await?;
+    expect(&mut bot, "lobby spawn", |e| matches!(e, BotEvent::Teleported(_))).await?;
+    Ok(bot)
+}
+
+/// Joins a published game from the Game Browser, following the handoff, and
+/// retrying while it reports the world restarting or full.
+async fn play(gate: &mut MockGate, mut bot: Bot, name: &str, game: &str, secret: &str) -> anyhow::Result<Bot> {
+    for attempt in 1.. {
+        bot.select_hotbar(0).await?;
+        bot.use_item().await?;
+        let items = expect_menu(&mut bot, "Game Browser").await?;
+        let idx = items
+            .iter()
+            .position(|i| i.contains(game))
+            .with_context(|| format!("{game} not listed: {items:?}"))?;
+        bot.click(idx as i16, 0).await?;
+        let reply = expect(&mut bot, "join reply", |e| {
+            matches!(e, BotEvent::Chat(m) if m.contains("Sending you to") || m.contains("queue") || m.contains("Try again"))
+        })
+        .await?;
+        let BotEvent::Chat(msg) = reply else { unreachable!() };
+        if msg.contains("queue") {
+            // Wait for the queue to move us.
+            expect_chat_within(&mut bot, "Sending you to", Duration::from_secs(20)).await?;
+        } else if !msg.contains("Sending you to") {
+            anyhow::ensure!(attempt < 20, "never got in: {msg}");
+            idle(&mut bot, Duration::from_millis(500)).await?;
+            continue;
+        }
+        let call = expect_connect(gate, name, "gh-").await?;
+        drop(bot);
+        let mut shard = Bot::connect_forwarded(call.address.context("shard address")?, name, secret).await?;
+        let reply = expect(&mut shard, "welcome", |e| {
+            matches!(e, BotEvent::Chat(m) if m.contains("Joined game") || m.contains("weren't expected"))
+        })
+        .await?;
+        if matches!(&reply, BotEvent::Chat(m) if m.contains("Joined game")) {
+            return Ok(shard);
+        }
+        anyhow::ensure!(attempt < 20, "the shard kept bouncing {name}");
+        let call = expect_connect(gate, name, "lobby").await?;
+        drop(shard);
+        bot = Bot::connect_forwarded(call.address.context("lobby address")?, name, secret).await?;
+        expect(&mut bot, "lobby spawn", |e| matches!(e, BotEvent::Teleported(_))).await?;
+    }
+    unreachable!()
+}
+
+async fn expect_chat_within(bot: &mut Bot, needle: &str, time: Duration) -> anyhow::Result<String> {
+    let event = tokio::time::timeout(time, bot.wait_for(|e| matches!(e, BotEvent::Chat(m) if m.contains(needle))))
+        .await
+        .with_context(|| format!("timed out waiting for {needle:?}"))??;
+    let BotEvent::Chat(msg) = event else { unreachable!() };
+    println!("  chat: ...{needle}...");
+    Ok(msg)
+}
+
+const MATCH_SCRIPT: &str = r#"
+game.Match.MinPlayers = 2
+game.Match.CountdownSeconds = 3
+local function everyone(text)
+    for _, p in game.Players:GetPlayers() do p:SendMessage(text) end
+end
+game.Match.Starting:Connect(function(seconds) everyone("starting in " .. seconds) end)
+game.Match.Started:Connect(function() everyone("match started v" .. tostring(game.Version)) end)
+game.Match.Ended:Connect(function(winners) everyone("ended, first winner " .. winners[1].Name) end)
+game.Players.PlayerAdded:Connect(function(player)
+    player.Chatted:Connect(function(message)
+        if message == "win" then game.Match:End(player) end
+    end)
+end)
+game:BindToClose(function() print("match closing") end)
+"#;
+
+const WORLD_V1: &str = r#"
+game.Players.PlayerAdded:Connect(function(player)
+    player:SendMessage("v1 hello last=" .. tostring(game.LastShutdown))
+    player.Chatted:Connect(function(message)
+        if message == "where" then
+            local p = player.Position
+            player:SendMessage("at " .. math.floor(p.X) .. "," .. math.floor(p.Z))
+        elseif message == "prize" then
+            player:Give(Item.new("diamond", { Name = "Prize" }))
+            player:SendMessage("gave prize")
+        elseif message == "block" then
+            player:SendMessage("block " .. game.World:GetBlock(Vector3.new(1, 65, 1)))
+        end
+    end)
+end)
+"#;
+
+/// Publishing and the game kinds: a match runs its countdown and ends back
+/// in the lobby; a persistent world keeps players' state across an idle
+/// unload, reports `LastShutdown`, and takes a "scripts + regions" update
+/// and a reset while a player is inside. Needs the lobby, a gamehost
+/// (`idle_unload_secs = 30`) and Postgres.
+pub async fn games(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result<()> {
+    let secret = std::env::var("MINIMODES_VELOCITY_SECRET").context("MINIMODES_VELOCITY_SECRET must be set")?;
+    let db = mm_db::connect(&mm_db::url_from_env()?, 2).await?;
+    let mut gate = mock_gate::start(gate_bind, lobby).await?;
+    wait_for_network(&gate, lobby).await?;
+    let pid = std::process::id() % 100_000;
+    let id_of = async |owner: &str, game: &str| -> anyhow::Result<i64> {
+        let owned = mm_db::owned_games(&db, bot_uuid(owner)).await?;
+        Ok(owned.iter().find(|g| g.name == game).context("created game not in the database")?.id)
+    };
+
+    println!("== match: countdown, start, End(winner), back to the lobby");
+    let (owner, game) = (format!("m{pid}"), format!("Arena {pid}"));
+    let mut owner_bot = create_kind(lobby, &owner, &game, &secret, MATCH).await?;
+    let id = id_of(&owner, &game).await?;
+    mm_db::put_draft_file(&db, id, "main.luau", MATCH_SCRIPT, None).await?;
+    publish_game(&mut owner_bot, &game, None).await?;
+    let (a, b) = (format!("ma{pid}"), format!("mb{pid}"));
+    let lobby_a = lobby_bot(lobby, &a, &secret).await?;
+    let mut alice = play(&mut gate, lobby_a, &a, &game, &secret).await?;
+    let lobby_b = lobby_bot(lobby, &b, &secret).await?;
+    let mut bob = play(&mut gate, lobby_b, &b, &game, &secret).await?;
+    expect_chat(&mut alice, "starting in 3").await?;
+    expect_chat_within(&mut alice, "match started v1", Duration::from_secs(6)).await?;
+    expect_chat(&mut bob, "match started v1").await?;
+
+    println!("a third player can't join a started match: they get a new instance");
+    let c = format!("mc{pid}");
+    let lobby_c = lobby_bot(lobby, &c, &secret).await?;
+    let mut carol = play(&mut gate, lobby_c, &c, &game, &secret).await?;
+    alice.chat("win").await?;
+    let over = expect_chat(&mut bob, "The match is over").await?;
+    anyhow::ensure!(over.contains(&a), "wrong winner: {over}");
+    expect_chat(&mut alice, &format!("ended, first winner {a}")).await?;
+    anyhow::ensure!(
+        tokio::time::timeout(Duration::from_millis(500), carol.wait_for(|e| matches!(e, BotEvent::Chat(m) if m.contains("match is over"))))
+            .await
+            .is_err(),
+        "the third player was put into the started match"
+    );
+    println!("after the result screen both go back to the lobby");
+    let first = tokio::time::timeout(Duration::from_secs(10), gate.connects.recv()).await?.context("gate stopped")?;
+    let second = tokio::time::timeout(Duration::from_secs(5), gate.connects.recv()).await?.context("gate stopped")?;
+    let mut sent: Vec<_> = [&first, &second].iter().map(|c| (c.player.clone(), c.server.clone())).collect();
+    sent.sort();
+    let mut want = vec![
+        (bot_uuid(&a).hyphenated().to_string(), "lobby".to_owned()),
+        (bot_uuid(&b).hyphenated().to_string(), "lobby".to_owned()),
+    ];
+    want.sort();
+    anyhow::ensure!(sent == want, "after the match: {sent:?}");
+    println!("  both sent to the lobby");
+    drop((alice, bob, carol));
+
+    println!("== persistent world: player state, LastShutdown, live updates");
+    let (owner, game) = (format!("w{pid}"), format!("Prison {pid}"));
+    let owner_bot = create_kind(lobby, &owner, &game, &secret, PERSISTENT).await?;
+    let id = id_of(&owner, &game).await?;
+    mm_db::put_draft_file(&db, id, "main.luau", WORLD_V1, None).await?;
+    let mut owner_bot = owner_bot;
+    publish_game(&mut owner_bot, &game, None).await?;
+
+    println!("owner builds a glass pad in the draft and marks it as a region");
+    let mut builder = open_draft(&mut gate, owner_bot, &owner, &game, &secret).await?;
+    select_square(&mut builder).await?;
+    builder.command("/set glass").await?;
+    expect_chat(&mut builder, "Changed 25 blocks to glass").await?;
+    builder.command("/region add pad").await?;
+    expect_chat(&mut builder, "Saved region").await?;
+    mm_db::put_draft_file(&db, id, "main.luau", &WORLD_V1.replace("v1 hello", "v2 hello"), None).await?;
+    let mut owner_bot = to_lobby(&mut gate, builder, &owner, &secret).await?;
+
+    let p = format!("wp{pid}");
+    let lobby_p = lobby_bot(lobby, &p, &secret).await?;
+    let mut player = play(&mut gate, lobby_p, &p, &game, &secret).await?;
+    expect_chat(&mut player, "v1 hello last=nil").await?;
+    player.chat("block").await?;
+    expect_chat(&mut player, "block air").await?;
+    player.chat("prize").await?;
+    expect_chat(&mut player, "gave prize").await?;
+
+    println!("publish v2 as scripts + regions while the player is inside (the draft saves first)");
+    publish_game(&mut owner_bot, &game, Some(13)).await?;
+    expect_chat(&mut player, "updated to v2").await?;
+    expect_chat(&mut player, "v2 hello").await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    player.chat("block").await?;
+    expect_chat(&mut player, "block glass").await?;
+
+    println!("move, leave, wait for the idle unload, come back");
+    player.move_to(chunkedge::protocol::math::DVec3::new(6.5, 65.0, -3.5)).await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    player.chat("where").await?;
+    expect_chat(&mut player, "at 6,-4").await?;
+    let lobby_p = to_lobby(&mut gate, player, &p, &secret).await?;
+    let mut lobby_p = lobby_p;
+    idle(&mut lobby_p, Duration::from_secs(38)).await?;
+    let saved_state = mm_db::publish::player_state(&db, id, bot_uuid(&p)).await?;
+    anyhow::ensure!(saved_state.is_some(), "the player's state wasn't saved");
+    let mut player = play(&mut gate, lobby_p, &p, &game, &secret).await?;
+    // The inventory is restored before scripts see the player, so the prize
+    // arrives ahead of the greeting.
+    let (mut prize, mut hello) = (false, None);
+    tokio::time::timeout(
+        STEP_TIMEOUT,
+        player.wait_for(|e| {
+            match e {
+                BotEvent::SlotChanged { window_id: 0, item, .. } if item.contains("Prize") => prize = true,
+                BotEvent::ScreenContent { window_id: 0, items } if items.iter().any(|i| i.contains("Prize")) => {
+                    prize = true
+                }
+                BotEvent::Chat(m) if m.contains("v2 hello last=") => hello = Some(m.clone()),
+                _ => {}
+            }
+            hello.is_some()
+        }),
+    )
+    .await
+    .context("no greeting after rejoining")??;
+    let hello = hello.unwrap_or_default();
+    anyhow::ensure!(!hello.contains("last=nil"), "LastShutdown not set after the unload: {hello}");
+    anyhow::ensure!(prize, "the prize wasn't restored");
+    println!("  prize restored");
+    player.chat("where").await?;
+    expect_chat(&mut player, "at 6,-4").await?;
+    player.chat("block").await?;
+    expect_chat(&mut player, "block glass").await?;
+
+    println!("publish v3 as a full reset while the player is inside");
+    // The owner sat unread through the wait and timed out; log in again.
+    drop(owner_bot);
+    let mut owner_bot = lobby_bot(lobby, &owner, &secret).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    publish_game(&mut owner_bot, &game, Some(15)).await?;
+    expect_chat(&mut player, "reset for v3").await?;
+    let backups = mm_db::publish::live_world_backups(&db, id).await?;
+    anyhow::ensure!(backups.len() == 1, "expected one backup, got {backups:?}");
+
+    println!("games scenario passed");
     Ok(())
 }

@@ -92,6 +92,8 @@ pub enum ShardMsg {
         level: DiagnosticLevel,
         message: String,
     },
+    /// Answers [`LobbyMsg::SaveDraft`]: the draft's map is in Postgres as of now.
+    DraftSaved { request: u64, ok: bool },
 }
 
 /// Lobby → shard.
@@ -116,6 +118,13 @@ pub enum LobbyMsg {
         /// Who asked, for the console.
         by: String,
     },
+    /// Save the running draft's map now (before publishing it); answered
+    /// with [`ShardMsg::DraftSaved`].
+    SaveDraft { game: GameId, request: u64 },
+    /// `version` was published. A running persistent world applies the
+    /// pending live update recorded in Postgres; other instances keep their
+    /// version until they end.
+    ApplyPublish { game: GameId, version: u32 },
 }
 
 pub fn encode_frame<T: Serialize>(msg: &T) -> io::Result<Vec<u8>> {
@@ -202,6 +211,7 @@ mod tests {
                 level: DiagnosticLevel::Error,
                 message: "x".repeat(10_000),
             },
+            ShardMsg::DraftSaved { request: 4, ok: false },
         ];
         let (mut a, mut b) = tokio::io::duplex(64);
         let writer = {
@@ -244,6 +254,14 @@ mod tests {
         };
         let got: LobbyMsg = read_frame(&mut encode_frame(&reload).unwrap().as_slice()).await.unwrap().unwrap();
         assert_eq!(got, reload);
+
+        for msg in [
+            LobbyMsg::SaveDraft { game: GameId(3), request: 8 },
+            LobbyMsg::ApplyPublish { game: GameId(3), version: 2 },
+        ] {
+            let got: LobbyMsg = read_frame(&mut encode_frame(&msg).unwrap().as_slice()).await.unwrap().unwrap();
+            assert_eq!(got, msg);
+        }
 
         let mut frame = encode_frame(&LobbyMsg::KillGame { game: GameId(3) }).unwrap();
         frame.pop();

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chunkedge::item::ItemComponent;
 use chunkedge::prelude::*;
-use mm_proto::{GameId, GameKind, GameSummary};
+use mm_proto::{GameId, GameKind, GameSummary, LiveUpdate};
 use mm_ui::{Menu, icon};
 
 use crate::catalog::{BrowserTab, GameCatalog, PlayerGames};
@@ -36,8 +36,14 @@ pub enum LobbyAction {
     StartSearch,
     /// Left click plays, right click toggles favorite.
     Game(GameId),
-    /// Join one of your own games' draft to build.
+    /// Join one of your own games' draft to build (right click: manage it).
     EditDraft(GameId),
+    /// Build, publish, settings and play for one of your games.
+    ManageGame(GameId),
+    /// Pick how a publish reaches a persistent world that's already live.
+    PublishModes(GameId),
+    Publish { game: GameId, mode: LiveUpdate },
+    TogglePlayerSaves(GameId),
     /// Step 1 of creating a game: pick its kind.
     CreateGame,
     /// Step 2: pick an icon.
@@ -63,6 +69,8 @@ pub fn render(
     Some(match view {
         LobbyAction::Browser { tab, page } => browser(catalog, player, *tab, *page),
         LobbyAction::MyGames { page } => my_games(player, *page),
+        LobbyAction::ManageGame(id) => manage(player, player.editable(*id)?),
+        LobbyAction::PublishModes(id) => publish_modes(player.owned(*id)?),
         LobbyAction::CreateGame => create_kind(),
         LobbyAction::CreateKind(kind) => create_icon(*kind),
         LobbyAction::Favorites { recent, page } => favorites(catalog, player, *recent, *page),
@@ -145,12 +153,108 @@ fn draft_icon(game: &GameSummary, shared: bool) -> ItemStack {
     if shared {
         lore.push(Text::text(format!("§7Owned by §f{}", game.creator)));
     }
+    lore.push(Text::text(match game.version {
+        0 => "§8Not published yet".to_owned(),
+        v => format!("§7Published §fv{v}"),
+    }));
     lore.extend([
         Text::default(),
         Text::text("§eClick to build"),
+        Text::text("§eRight-click to publish and manage"),
         Text::text("§8/script edit inside opens the editor"),
     ]);
     icon(kind, format!("§a{}", game.name), lore)
+}
+
+fn persistent(game: &GameSummary) -> bool {
+    game.kind
+        == GameKind::OpenWorld {
+            persistent_world: true,
+        }
+}
+
+fn manage(player: &PlayerGames, game: &GameSummary) -> Menu<LobbyAction> {
+    let mut menu = Menu::new(format!("Manage: {}", game.name), 3);
+    let owner = player.owned(game.id).is_some();
+    menu.button(
+        10,
+        icon(ItemKind::Bricks, "§aBuild", [Text::text("§7Open the draft world")]),
+        LobbyAction::EditDraft(game.id),
+    );
+    if owner {
+        let mut lore = vec![Text::text(match game.version {
+            0 => "§7Make the draft playable by everyone".to_owned(),
+            v => format!("§7Replace v{v} with the current draft"),
+        })];
+        let modes = persistent(game) && game.version > 0;
+        if modes {
+            lore.push(Text::text("§7You'll choose what happens to the live world"));
+        } else if game.version > 0 {
+            lore.push(Text::text("§7Running instances finish on their version"));
+        }
+        let action = if modes {
+            LobbyAction::PublishModes(game.id)
+        } else {
+            LobbyAction::Publish {
+                game: game.id,
+                mode: LiveUpdate::Reset,
+            }
+        };
+        menu.button(12, icon(ItemKind::Beacon, format!("§bPublish v{}", game.version + 1), lore), action);
+        if matches!(game.kind, GameKind::OpenWorld { .. }) {
+            let on = player.player_saves.contains(&game.id);
+            let (item, state) = if on {
+                (ItemKind::LimeDye, "§aOn")
+            } else {
+                (ItemKind::GrayDye, "§cOff")
+            };
+            menu.button(
+                14,
+                icon(
+                    item,
+                    format!("§eSave player progress: {state}"),
+                    [
+                        Text::text("§7Keep each player's inventory and"),
+                        Text::text("§7position between visits"),
+                        Text::text("§8Click to toggle"),
+                    ],
+                ),
+                LobbyAction::TogglePlayerSaves(game.id),
+            );
+        }
+    } else {
+        menu.item(
+            12,
+            icon(ItemKind::Barrier, "§7Publish", [Text::text(format!("§7Only {} can publish", game.creator))]),
+        );
+    }
+    if game.version > 0 {
+        menu.button(16, icon(ItemKind::Emerald, "§aPlay", [Text::text(format!("§7Join v{}", game.version))]), LobbyAction::Game(game.id));
+    }
+    menu.button(22, icon(ItemKind::Arrow, "§7Back", []), LobbyAction::MyGames { page: 0 });
+    menu.fill_empty_where(&icon(ItemKind::GrayStainedGlassPane, " ", []), |_| true);
+    menu
+}
+
+fn publish_modes(game: &GameSummary) -> Menu<LobbyAction> {
+    let mut menu = Menu::new(format!("Publish v{}", game.version + 1), 3);
+    for (slot, item, mode, name, hint) in [
+        (11, ItemKind::WritableBook, LiveUpdate::Scripts, "§aScripts only", "Swap the scripts; the world stays as players left it"),
+        (
+            13,
+            ItemKind::GoldenShovel,
+            LiveUpdate::Regions,
+            "§eScripts + regions",
+            "Also copy the draft's //region boxes over the world",
+        ),
+        (15, ItemKind::Tnt, LiveUpdate::Reset, "§cFull reset", "Back the world up, then replace it with the draft's map"),
+    ] {
+        let lore = wrap(hint, 32).into_iter().map(|l| Text::text(format!("§7{l}")));
+        menu.button(slot, icon(item, name, lore), LobbyAction::Publish { game: game.id, mode });
+    }
+    menu.button(22, icon(ItemKind::Arrow, "§7Back", []), LobbyAction::ManageGame(game.id));
+    menu.fill_empty_where(&icon(ItemKind::GrayStainedGlassPane, " ", []), |_| true);
+    menu
 }
 
 fn kind_label(kind: GameKind) -> &'static str {

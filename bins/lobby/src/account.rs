@@ -1,13 +1,13 @@
 //! Per-player database state: rank and owned games, loaded on join, and game
 //! creation. Queries run on tokio; results come back through a channel.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chunkedge::UniqueId;
 use chunkedge::prelude::*;
 use mm_core::Tokio;
 use mm_db::{NewGame, Pool};
-use mm_proto::{GameKind, GameSummary};
+use mm_proto::{GameId, GameKind, GameSummary};
 use serde::Deserialize;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -69,6 +69,7 @@ enum DbEvent {
         rank: Option<String>,
         owned: Vec<GameSummary>,
         shared: Vec<GameSummary>,
+        player_saves: HashSet<GameId>,
     },
     Created {
         client: Entity,
@@ -121,6 +122,7 @@ fn load_accounts(
                 Ok((rank, owned, shared)) => DbEvent::Loaded {
                     client,
                     rank,
+                    player_saves: owned.iter().filter(|g| g.save_player_state).map(|g| GameId(g.id)).collect(),
                     owned: owned.iter().map(|g| g.summary()).collect(),
                     shared: shared.iter().map(|g| g.summary()).collect(),
                 },
@@ -192,9 +194,11 @@ fn apply_db_events(mut events: ResMut<DbEvents>, mut players: Query<(&mut Client
                 rank,
                 owned,
                 shared,
+                player_saves,
             } => {
                 if let Ok((_, mut games)) = players.get_mut(client) {
                     games.rank = rank;
+                    games.player_saves = player_saves;
                     games.owned = owned;
                     games.shared = shared;
                     games.loaded = true;
@@ -210,6 +214,7 @@ fn apply_db_events(mut events: ResMut<DbEvents>, mut players: Query<(&mut Client
                             "§aCreated §f{}§a. Open §bMy Games§a and click it to start building.",
                             game.name
                         ));
+                        games.player_saves.insert(game.id);
                         games.owned.insert(0, game);
                     }
                     None => {

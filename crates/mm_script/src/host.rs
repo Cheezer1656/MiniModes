@@ -9,10 +9,13 @@ use mlua::{AnyUserData, Function, IntoLuaMulti, Lua, MultiValue, Thread};
 use mm_proto::ipc::DiagnosticLevel;
 use mm_world::{BlockMirror, Bounds};
 
-use crate::io::{Command, Diagnostic, Limits, PlayerId, PlayerSnap, RegionId};
+use crate::io::{Command, Diagnostic, GameInfo, Limits, MatchPhase, PlayerId, PlayerSnap, RegionId};
 use crate::rules::Rules;
 
 pub(crate) const TICKS_PER_SECOND: f64 = 20.0;
+/// Match defaults until scripts change them; the host uses the same.
+pub const DEFAULT_MIN_PLAYERS: u32 = 2;
+pub const DEFAULT_COUNTDOWN: u32 = 10;
 
 pub(crate) fn host(lua: &Lua) -> mlua::AppDataRefMut<'_, Host> {
     lua.app_data_mut::<Host>().expect("VM host state")
@@ -39,7 +42,20 @@ pub(crate) struct Host {
     pub next_region: RegionId,
     pub game_rules: Rules,
     pub game: GameSignals,
+    pub info: GameInfo,
+    pub matches: MatchView,
+    /// `game:BindToClose` callbacks.
+    pub close_handlers: Vec<Function>,
+    /// Threads running them, once the instance started closing.
+    pub closing: Option<Vec<Thread>>,
     rng: u64,
+}
+
+/// The match as scripts see it; the host owns the real state.
+pub(crate) struct MatchView {
+    pub phase: MatchPhase,
+    pub min_players: u32,
+    pub countdown: u32,
 }
 
 pub(crate) struct GameSignals {
@@ -47,6 +63,9 @@ pub(crate) struct GameSignals {
     pub player_removing: SignalId,
     pub block_broken: SignalId,
     pub block_placed: SignalId,
+    pub match_starting: SignalId,
+    pub match_started: SignalId,
+    pub match_ended: SignalId,
 }
 
 pub(crate) struct PlayerEntry {
@@ -66,13 +85,21 @@ pub(crate) struct Region {
 }
 
 impl Host {
-    pub fn new(limits: Limits, mirror: BlockMirror) -> Self {
+    pub fn new(limits: Limits, mirror: BlockMirror, info: GameInfo) -> Self {
         let mut signals = Signals::default();
         let game = GameSignals {
             player_added: signals.create(),
             player_removing: signals.create(),
             block_broken: signals.create(),
             block_placed: signals.create(),
+            match_starting: signals.create(),
+            match_started: signals.create(),
+            match_ended: signals.create(),
+        };
+        let matches = MatchView {
+            phase: MatchPhase::Waiting,
+            min_players: DEFAULT_MIN_PLAYERS.min(info.max_players),
+            countdown: DEFAULT_COUNTDOWN,
         };
         Self {
             tick: 0,
@@ -90,6 +117,10 @@ impl Host {
             next_region: 1,
             game_rules: Rules::default(),
             game,
+            info,
+            matches,
+            close_handlers: Vec::new(),
+            closing: None,
             rng: 0x9e37_79b9_7f4a_7c15,
         }
     }

@@ -1,5 +1,6 @@
 //! Script hosting: each instance with scripts owns one [`Vm`], stepped once
-//! per tick on the async compute pool.
+//! per tick on the async compute pool. Drafts run the draft's files; other
+//! instances run the files of their published version.
 //!
 //! The pipeline runs in two halves around the build systems:
 //! - [`ScriptSet::Apply`]: take finished steps back and apply their commands,
@@ -11,6 +12,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
+use std::time::{Duration, Instant};
 
 use bevy_tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use chunkedge::prelude::bevy_ecs::system::SystemParam;
@@ -25,15 +27,19 @@ use chunkedge::prelude::*;
 use chunkedge::protocol::sound::{Sound, SoundCategory};
 use chunkedge::status::RequestRespawnMessage;
 use mm_core::Tokio;
-use mm_proto::GameId;
+use mm_proto::{GameId, GameKind};
 use mm_proto::ipc::{DiagnosticLevel, ShardMsg};
-use mm_script::{Bundle, Command, Event, Limits, PlayerId, PlayerSnap, RuleSet, Snapshot, StepOutput, Vm};
-use mm_world::BlockMirror;
+use mm_script::{Bundle, Command, Event, GameInfo, Limits, PlayerId, PlayerSnap, RuleSet, Snapshot, StepOutput, Vm};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::instance::{InInstance, Instance, SendToLobby};
+use crate::instance::{InInstance, Instance, SendToLobby, StopRequest};
 use crate::link::LobbyLink;
-use crate::world::{DraftWorld, Storage};
+use crate::matches::MatchCommand;
+use crate::players::Ready;
+use crate::world::{GameWorld, Storage};
+
+/// A published open world whose scripts crashed restarts them after this.
+const CRASH_RESTART: Duration = Duration::from_secs(30);
 
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScriptSet {
@@ -77,6 +83,10 @@ pub struct ScriptHost {
     resync: bool,
     runnable: bool,
     next_timer: Option<u64>,
+    /// `Event::Closing` was queued.
+    close_sent: bool,
+    /// The VM reported every `BindToClose` callback done.
+    closed: bool,
 }
 
 impl ScriptHost {
@@ -91,7 +101,22 @@ impl ScriptHost {
             resync: false,
             runnable: true,
             next_timer: None,
+            close_sent: false,
+            closed: false,
         }
+    }
+
+    pub fn push(&mut self, event: Event) {
+        self.inbox.push(event);
+    }
+
+    pub fn id_of(&self, player: Entity) -> Option<PlayerId> {
+        self.ids.get(&player).copied()
+    }
+
+    /// The instance may go: its `BindToClose` callbacks finished.
+    pub fn closed(&self) -> bool {
+        self.closed
     }
 
     /// Queues an event about `player`, if the VM knows them.
@@ -113,6 +138,16 @@ pub struct ReloadDraft {
     pub game: GameId,
     pub by: String,
 }
+
+/// Restart an instance's scripts from its current version (a live update).
+#[derive(Message, Clone, Copy, Debug)]
+pub struct RestartScripts {
+    pub layer: Entity,
+}
+
+/// Scripts crashed in a published open world; start them again at this time.
+#[derive(Component)]
+struct RestartAt(Instant);
 
 /// Script output forwarded to the editor console per instance per second;
 /// the rest is counted and reported as dropped.
@@ -179,12 +214,14 @@ impl Plugin for ScriptPlugin {
         let (tx, rx) = mpsc::unbounded_channel();
         app.insert_resource(Loads { tx, rx })
             .add_message::<ReloadDraft>()
+            .add_message::<RestartScripts>()
             .add_systems(
                 Update,
                 (
-                    load_new_drafts,
+                    load_new_worlds,
                     script_commands,
                     editor_reloads,
+                    requested_restarts,
                     apply_loads,
                     poll_steps,
                     apply_pending_blocks,
@@ -208,17 +245,31 @@ struct Loader<'w> {
 }
 
 impl Loader<'_> {
-    /// Loads the draft's scripts and builds a VM off the main thread.
-    fn start(&self, layer: Entity, game: GameId, generation: u64, blocks: BlockMirror) {
+    /// Loads the instance's scripts and builds a VM off the main thread.
+    fn start(&self, layer: Entity, generation: u64, instance: &Instance, world: &GameWorld) {
         let (db, tx, limits) = (self.storage.db.clone(), self.loads.tx.clone(), self.config.limits.clone());
+        let game = instance.spec.game;
+        let version = world.version;
+        let blocks = world.mirror.clone();
+        let info = GameInfo {
+            game_id: game.0,
+            version,
+            kind: instance.spec.kind,
+            max_players: instance.spec.max_players,
+            last_shutdown: world.last_shutdown,
+        };
         self.tokio.0.spawn(async move {
             let result = async {
-                let files = mm_db::draft_files(&db, game.0).await.map_err(|e| format!("loading scripts: {e}"))?;
+                let files = match version {
+                    None => mm_db::draft_files(&db, game.0).await,
+                    Some(v) => mm_db::publish::version(&db, game.0, v).await.map(|v| v.map(|v| v.files).unwrap_or_default()),
+                };
+                let files = files.map_err(|e| format!("loading scripts: {e}"))?;
                 if files.is_empty() {
                     return Ok(None);
                 }
                 let bundle = Bundle::new(files)?;
-                tokio::task::spawn_blocking(move || Vm::new(bundle, limits, blocks).map(|vm| Some(Box::new(vm))))
+                tokio::task::spawn_blocking(move || Vm::new(bundle, limits, blocks, info).map(|vm| Some(Box::new(vm))))
                     .await
                     .map_err(|e| e.to_string())?
             }
@@ -233,50 +284,71 @@ impl Loader<'_> {
     }
 }
 
-/// Drafts start their scripts once the map is loaded.
-fn load_new_drafts(
+/// Instances start their scripts once the map is loaded.
+fn load_new_worlds(
     mut commands: Commands,
-    layers: Query<(Entity, &Instance, &DraftWorld), Added<DraftWorld>>,
+    layers: Query<(Entity, &Instance, &GameWorld), Added<GameWorld>>,
     loader: Loader,
 ) {
     for (layer, instance, world) in &layers {
         commands
             .entity(layer)
             .insert((ScriptGeneration(1), GameRules::default(), ConsoleBudget::default()));
-        loader.start(layer, instance.spec.game, 1, world.mirror.clone());
+        loader.start(layer, 1, instance, world);
     }
 }
 
-/// Restarts (or just stops) a draft's scripts, dropping whatever rules
+/// Restarts (or just stops) an instance's scripts, dropping whatever rules
 /// they set.
 fn restart(
     commands: &mut Commands,
     loader: &Loader,
     layer: Entity,
-    (instance, world, generation, rules): (&Instance, &DraftWorld, &mut ScriptGeneration, &mut GameRules),
+    (instance, world, generation, rules): (&Instance, &GameWorld, &mut ScriptGeneration, &mut GameRules),
     start: bool,
 ) {
     generation.0 += 1;
     rules.0 = RuleSet::default();
-    commands.entity(layer).remove::<ScriptHost>();
+    commands.entity(layer).remove::<(ScriptHost, RestartAt)>();
     if start {
-        loader.start(layer, instance.spec.game, generation.0, world.mirror.clone());
+        loader.start(layer, generation.0, instance, world);
     }
 }
 
-type DraftParts<'a> = (
+type WorldParts<'a> = (
     &'a Instance,
-    &'a DraftWorld,
+    &'a GameWorld,
     &'a mut ScriptGeneration,
     &'a mut GameRules,
 );
+
+/// Live updates, and open worlds whose scripts crashed a while ago.
+fn requested_restarts(
+    mut commands: Commands,
+    mut requests: MessageReader<RestartScripts>,
+    mut layers: Query<(Entity, WorldParts, Option<&RestartAt>), Without<Despawned>>,
+    loader: Loader,
+) {
+    let mut due: Vec<Entity> = requests.read().map(|r| r.layer).collect();
+    due.extend(
+        layers
+            .iter()
+            .filter(|(.., at)| at.is_some_and(|at| Instant::now() >= at.0))
+            .map(|(layer, ..)| layer),
+    );
+    for layer in due {
+        if let Ok((_, (instance, world, mut generation, mut rules), _)) = layers.get_mut(layer) {
+            restart(&mut commands, &loader, layer, (instance, world, &mut *generation, &mut *rules), true);
+        }
+    }
+}
 
 /// `/script reload|stop|edit` inside a draft.
 fn script_commands(
     mut commands: Commands,
     mut messages: MessageReader<CommandExecutionMessage>,
     mut players: Query<(&mut Client, &InInstance, &UniqueId, &Username)>,
-    mut layers: Query<DraftParts>,
+    mut layers: Query<WorldParts>,
     loader: Loader,
     link: Res<LobbyLink>,
 ) {
@@ -289,7 +361,9 @@ fn script_commands(
             continue;
         };
         let layer = in_instance.0;
-        let Ok((instance, world, mut generation, mut rules)) = layers.get_mut(layer) else {
+        let Ok((instance, world, mut generation, mut rules)) = layers.get_mut(layer).map_err(|_| ()).and_then(|parts| {
+            if parts.1.is_draft() { Ok(parts) } else { Err(()) }
+        }) else {
             client.send_chat_message("§cScripts can only be controlled while editing a draft.");
             continue;
         };
@@ -341,14 +415,14 @@ fn script_commands(
 fn editor_reloads(
     mut commands: Commands,
     mut reloads: MessageReader<ReloadDraft>,
-    mut layers: Query<(Entity, DraftParts)>,
+    mut layers: Query<(Entity, WorldParts)>,
     mut players: Query<(&InInstance, &mut Client)>,
     loader: Loader,
     link: Res<LobbyLink>,
 ) {
     for reload in reloads.read() {
         for (layer, (instance, world, mut generation, mut rules)) in &mut layers {
-            if instance.spec.game != reload.game || !instance.is_draft() {
+            if instance.spec.game != reload.game || !world.is_draft() {
                 continue;
             }
             restart(&mut commands, &loader, layer, (instance, world, &mut *generation, &mut *rules), true);
@@ -365,7 +439,7 @@ fn editor_reloads(
 fn apply_loads(
     mut commands: Commands,
     mut loads: ResMut<Loads>,
-    layers: Query<&ScriptGeneration, Without<Despawned>>,
+    layers: Query<(&ScriptGeneration, &Instance), Without<Despawned>>,
     mut players: Query<(&InInstance, &mut Client)>,
     mut clients: Query<&mut Client, Without<InInstance>>,
     link: Res<LobbyLink>,
@@ -397,12 +471,13 @@ fn apply_loads(
                 continue;
             }
         };
-        let Ok(current) = layers.get(layer) else {
+        let Ok((current, instance)) = layers.get(layer) else {
             continue;
         };
         if current.0 != generation {
             continue;
         }
+        let draft = instance.is_draft();
         let notice = match result {
             Ok(Some(vm)) => {
                 commands.entity(layer).insert(ScriptHost::new(vm));
@@ -418,6 +493,10 @@ fn apply_loads(
                 format!("§cScripts failed to start: §7{e}")
             }
         };
+        // Players of a published game don't need to hear about scripts.
+        if !draft {
+            continue;
+        }
         for (in_instance, mut client) in &mut players {
             if in_instance.0 == layer {
                 client.send_chat_message(notice.clone());
@@ -453,11 +532,13 @@ fn poll_steps(
         &mut ScriptHost,
         &mut GameRules,
         &mut ChunkLayer,
-        &mut DraftWorld,
+        &mut GameWorld,
         &mut ConsoleBudget,
     )>,
     mut players: Query<PlayerParts, With<InInstance>>,
     mut to_lobby: MessageWriter<SendToLobby>,
+    mut matches: MessageWriter<MatchCommand>,
+    mut stops: MessageWriter<StopRequest>,
     link: Res<LobbyLink>,
     server: Res<Server>,
 ) {
@@ -489,6 +570,7 @@ fn poll_steps(
         host.slot = Slot::Idle(vm);
         host.runnable = out.runnable;
         host.next_timer = out.next_timer;
+        host.closed |= out.closed;
 
         let mut chat = Vec::new();
         for d in out.diagnostics {
@@ -503,7 +585,22 @@ fn poll_steps(
             }
         }
         for command in out.commands {
-            apply_command(command, &mut host, &mut rules, &mut chunks, &mut world, &mut players, &mut to_lobby);
+            match command {
+                Command::MatchSettings { min_players, countdown } => {
+                    matches.write(MatchCommand::Settings {
+                        layer,
+                        min_players,
+                        countdown,
+                    });
+                }
+                Command::EndMatch { winners } => {
+                    let winners = winners.iter().filter_map(|id| host.entities.get(id).copied()).collect();
+                    matches.write(MatchCommand::End { layer, winners });
+                }
+                command => {
+                    apply_command(command, &mut host, &mut rules, &mut chunks, &mut world, &mut players, &mut to_lobby)
+                }
+            }
         }
         if let Some(reason) = out.fatal {
             tracing::warn!("stopping scripts of game {}: {reason}", game.0);
@@ -511,6 +608,23 @@ fn poll_steps(
             chat.push(format!("§cScripts stopped: §7{reason}"));
             rules.0 = RuleSet::default();
             commands.entity(layer).remove::<ScriptHost>();
+            if !instance.is_draft() && instance.closing.is_none() {
+                if instance.spec.kind == GameKind::Match {
+                    // The match can't go on; everyone goes back to the lobby.
+                    for &entity in host.entities.values() {
+                        if let Ok((mut client, ..)) = players.get_mut(entity) {
+                            client.send_chat_message("§cThis game hit an error and has to end. Sorry!");
+                        }
+                    }
+                    stops.write(StopRequest {
+                        instance: instance.spec.id,
+                        graceful: false,
+                    });
+                } else {
+                    report(&link, game, DiagnosticLevel::System, "restarting the scripts in 30 seconds");
+                    commands.entity(layer).insert(RestartAt(Instant::now() + CRASH_RESTART));
+                }
+            }
         }
         if !chat.is_empty() && instance.is_draft() {
             for &entity in host.entities.values() {
@@ -529,7 +643,7 @@ fn apply_command(
     host: &mut ScriptHost,
     rules: &mut GameRules,
     chunks: &mut ChunkLayer,
-    world: &mut DraftWorld,
+    world: &mut GameWorld,
     players: &mut Query<PlayerParts, With<InInstance>>,
     to_lobby: &mut MessageWriter<SendToLobby>,
 ) {
@@ -659,7 +773,7 @@ fn give(inventory: &mut Inventory, mut item: ItemStack) {
     }
 }
 
-fn apply_pending_blocks(mut layers: Query<(&mut ScriptHost, &mut ChunkLayer, &mut DraftWorld)>, config: Res<ScriptConfig>) {
+fn apply_pending_blocks(mut layers: Query<(&mut ScriptHost, &mut ChunkLayer, &mut GameWorld)>, config: Res<ScriptConfig>) {
     for (mut host, mut chunks, mut world) in &mut layers {
         let n = host.pending_blocks.len().min(config.blocks_per_tick);
         for (p, state) in host.pending_blocks.drain(..n) {
@@ -670,17 +784,22 @@ fn apply_pending_blocks(mut layers: Query<(&mut ScriptHost, &mut ChunkLayer, &mu
     }
 }
 
-/// Tells each VM who arrived and who left since the last tick.
+/// Tells each VM who arrived and who left since the last tick, and when
+/// its instance started closing.
 fn track_members(
-    mut layers: Query<(Entity, &mut ScriptHost)>,
-    players: Query<(Entity, &InInstance, &Username, &UniqueId), With<Client>>,
+    mut layers: Query<(Entity, &mut ScriptHost, &Instance)>,
+    players: Query<(Entity, &InInstance, &Username, &UniqueId), (With<Client>, With<Ready>)>,
 ) {
     let mut members: HashMap<Entity, Vec<(Entity, &Username, &UniqueId)>> = HashMap::new();
     for (entity, in_instance, name, uuid) in &players {
         members.entry(in_instance.0).or_default().push((entity, name, uuid));
     }
-    for (layer, mut host) in &mut layers {
-        let present = members.remove(&layer).unwrap_or_default();
+    for (layer, mut host, instance) in &mut layers {
+        let present = if instance.closing.is_some() {
+            Vec::new()
+        } else {
+            members.remove(&layer).unwrap_or_default()
+        };
         let gone: Vec<_> = host
             .ids
             .iter()
@@ -706,6 +825,10 @@ fn track_members(
                 uuid: uuid.0,
             });
         }
+        if instance.closing.is_some() && !host.close_sent {
+            host.close_sent = true;
+            host.inbox.push(Event::Closing);
+        }
     }
 }
 
@@ -713,7 +836,7 @@ fn track_members(
 fn respawn(
     mut messages: MessageReader<RequestRespawnMessage>,
     mut players: Query<(&InInstance, &mut Position, &mut Health, &mut Food)>,
-    mut layers: Query<(&DraftWorld, Option<&mut ScriptHost>)>,
+    mut layers: Query<(&GameWorld, Option<&mut ScriptHost>)>,
 ) {
     for msg in messages.read() {
         let Ok((in_instance, mut pos, mut health, mut food)) = players.get_mut(msg.client) else {
@@ -759,7 +882,7 @@ type SnapParts<'a> = (
 );
 
 fn spawn_steps(
-    mut layers: Query<(Entity, &mut ScriptHost, &DraftWorld), Without<Despawned>>,
+    mut layers: Query<(Entity, &mut ScriptHost, &GameWorld), Without<Despawned>>,
     players: Query<SnapParts, With<Client>>,
     server: Res<Server>,
 ) {

@@ -164,6 +164,21 @@ impl BlockMirror {
         self.dirty.extend(sections);
     }
 
+    /// Blocks inside `region` where `other` differs from this mirror, with
+    /// `other`'s state: what makes this mirror match it there.
+    pub fn differences(&self, other: &BlockMirror, region: Bounds) -> Vec<([i32; 3], BlockState)> {
+        let Some(region) = region.intersect(&self.bounds) else {
+            return Vec::new();
+        };
+        region
+            .iter()
+            .filter_map(|p| {
+                let theirs = other.get(p);
+                (self.get(p) != theirs).then_some((p, theirs))
+            })
+            .collect()
+    }
+
     /// Non-air sections, for encoding.
     pub(crate) fn solid_sections(&self) -> impl Iterator<Item = (&SectionPos, &Section)> {
         self.sections.iter().filter(|(_, s)| !s.is_air()).map(|(p, s)| (p, &**s))
@@ -270,5 +285,20 @@ mod tests {
         mirror.set([1, 64, 1], BlockState::GLASS);
         assert_eq!(snapshot.get([1, 64, 1]), BlockState::GRASS_BLOCK);
         assert_eq!(mirror.get([1, 64, 1]), BlockState::GLASS);
+    }
+
+    #[test]
+    fn differences_inside_a_region() {
+        let bounds = Bounds::square(32);
+        let live = BlockMirror::flat(bounds, 10);
+        let mut published = live.clone();
+        published.set([1, 11, 1], BlockState::STONE);
+        published.set([5, 11, 5], BlockState::STONE);
+        published.set([1, 10, 1], BlockState::AIR);
+        let region = Bounds::from_corners([0, 0, 0], [2, 20, 2]);
+        let mut diff = live.differences(&published, region);
+        diff.sort_by_key(|(p, _)| *p);
+        assert_eq!(diff, [([1, 10, 1], BlockState::AIR), ([1, 11, 1], BlockState::STONE)]);
+        assert!(live.differences(&published, Bounds::from_corners([100, 0, 0], [101, 1, 1])).is_empty());
     }
 }

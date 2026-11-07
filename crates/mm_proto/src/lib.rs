@@ -37,8 +37,42 @@ pub struct GameSummary {
     pub featured: bool,
     /// Unix seconds of the first publish.
     pub published_at: i64,
+    /// The latest published version; new instances run it. 0 for a game
+    /// that was never published (drafts listed in My Games).
+    pub version: u32,
     /// Mean rating out of 5, if anyone rated it.
     pub rating: Option<f32>,
+}
+
+/// How a publish reaches a persistent world that already exists. Other
+/// kinds always start new instances from the published map.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LiveUpdate {
+    /// Swap the scripts; keep the world as players left it.
+    Scripts,
+    /// Swap the scripts and copy the draft's marked regions over the world.
+    Regions,
+    /// Back the world up, then replace it with the published map.
+    Reset,
+}
+
+impl LiveUpdate {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scripts => "scripts",
+            Self::Regions => "regions",
+            Self::Reset => "reset",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "scripts" => Self::Scripts,
+            "regions" => Self::Regions,
+            "reset" => Self::Reset,
+            _ => return None,
+        })
+    }
 }
 
 /// Live numbers for a game, reported by shards.

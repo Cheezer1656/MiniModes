@@ -8,6 +8,8 @@
 //!   draft, and check the build survives an unload (same setup, plus Postgres).
 //! - `mmbot scripts <lobby_addr> [gate_api_bind]`: run Luau scripts in a draft:
 //!   events, chat, rules, reload, and a runaway script being stopped.
+//! - `mmbot games <lobby_addr> [gate_api_bind]`: publish a match and a
+//!   persistent world; the match flow, player state, idle unload and live updates.
 //! - `mmbot editor <lobby_addr> [gate_api_bind]`: the web editor: login link,
 //!   file API, hot reload, console stream, history and collaborators.
 //! - `mmbot editor-link <game_id> [editor_url]`: print a sign-in link to the
@@ -50,11 +52,15 @@ async fn main() -> anyhow::Result<()> {
             let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
             scenarios::scripts(addr, gate).await
         }
+        "games" => {
+            let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
+            scenarios::games(addr, gate).await
+        }
         "editor" => {
             let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
             scenarios::editor(addr, gate).await
         }
-        other => anyhow::bail!("unknown mode `{other}` (expected join | lobby-ui | handoff | drafts | scripts | editor)"),
+        other => anyhow::bail!("unknown mode `{other}` (expected join | lobby-ui | handoff | drafts | scripts | games | editor)"),
     }
 }
 

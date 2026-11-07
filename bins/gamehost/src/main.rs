@@ -4,6 +4,8 @@ mod build;
 mod config;
 mod instance;
 mod link;
+mod matches;
+mod players;
 mod script;
 mod world;
 
@@ -16,6 +18,8 @@ use mm_gate::GateClient;
 use crate::build::BuildSet;
 use crate::config::GamehostConfig;
 use crate::instance::{IdleUnload, InstanceSet};
+use crate::matches::MatchSet;
+use crate::players::PlayerSet;
 use crate::script::ScriptSet;
 use crate::world::WorldSet;
 use crate::link::{GateLink, ShutdownRequests};
@@ -57,6 +61,7 @@ fn main() -> anyhow::Result<()> {
         .insert_resource(IdleUnload(Duration::from_secs(config.idle_unload_secs)))
         .insert_resource(storage)
         .insert_resource(world::Autosave(Duration::from_secs(config.autosave_secs)))
+        .insert_resource(world::UpdateBlocksPerTick(config.edit_blocks_per_tick.max(1)))
         .insert_resource(build::EditLimits {
             max_volume: config.max_edit_volume,
             blocks_per_tick: config.edit_blocks_per_tick,
@@ -64,13 +69,24 @@ fn main() -> anyhow::Result<()> {
         .insert_resource(config.scripts.script_config(config.editor_url.clone()))
         .configure_sets(
             Update,
-            (InstanceSet, WorldSet, ScriptSet::Apply, BuildSet, ScriptSet::Spawn).chain(),
+            (
+                InstanceSet,
+                WorldSet,
+                PlayerSet,
+                ScriptSet::Apply,
+                BuildSet,
+                MatchSet,
+                ScriptSet::Spawn,
+            )
+                .chain(),
         )
         .add_plugins((
             instance::InstancePlugin,
             world::WorldPlugin,
             build::BuildPlugin,
             script::ScriptPlugin,
+            players::PlayersPlugin,
+            matches::MatchPlugin,
         ))
         .run();
 

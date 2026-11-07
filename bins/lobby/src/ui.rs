@@ -13,6 +13,7 @@ use crate::chat::{ChatPrompt, PromptPurpose};
 use crate::config::{HotbarConfig, MenuName, NpcConfig};
 use crate::join::JoinRequest;
 use crate::menus::{self, LobbyAction};
+use crate::publish::{PlayerSavesSetting, PublishRequest};
 use crate::world::LobbyLayer;
 
 #[derive(Resource)]
@@ -91,6 +92,7 @@ fn give_hotbar(mut commands: Commands, clients: Query<Entity, Added<Client>>, co
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_actions(
     mut commands: Commands,
     mut actions: MessageReader<UiAction<LobbyAction>>,
@@ -98,6 +100,8 @@ fn handle_actions(
     catalog: Res<GameCatalog>,
     server: Res<Server>,
     mut joins: MessageWriter<JoinRequest>,
+    mut publishes: MessageWriter<PublishRequest>,
+    mut settings: MessageWriter<PlayerSavesSetting>,
 ) {
     for UiAction { client: player, action, source } in actions.read() {
         let Ok((mut client, mut games, view)) = players.get_mut(*player) else {
@@ -129,6 +133,35 @@ fn handle_actions(
                 ));
                 client.send_chat_message("§aType a name for your game in chat §7(or \"cancel\")");
                 continue;
+            }
+            LobbyAction::EditDraft(id) if matches!(source, UiSource::Menu { button: 1, .. }) => {
+                LobbyAction::ManageGame(*id)
+            }
+            LobbyAction::Publish { game, mode } => {
+                commands.close_menu(*player);
+                commands.entity(*player).remove::<CurrentView>();
+                publishes.write(PublishRequest {
+                    client: *player,
+                    game: *game,
+                    mode: *mode,
+                });
+                continue;
+            }
+            LobbyAction::TogglePlayerSaves(id) => {
+                let on = !games.player_saves.remove(id);
+                if on {
+                    games.player_saves.insert(*id);
+                }
+                settings.write(PlayerSavesSetting {
+                    game: *id,
+                    on,
+                });
+                client.send_action_bar_message(if on {
+                    "§aPlayer progress will be saved (applies to newly started worlds)"
+                } else {
+                    "§7Player progress won't be saved"
+                });
+                LobbyAction::ManageGame(*id)
             }
             LobbyAction::EditDraft(id) => {
                 commands.close_menu(*player);

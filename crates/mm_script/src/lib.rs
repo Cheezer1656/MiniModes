@@ -16,7 +16,10 @@ mod rules;
 mod vm;
 
 pub use bundle::{Bundle, ENTRY};
-pub use io::{Command, Diagnostic, Event, Limits, PlayerId, PlayerSnap, RegionId, Snapshot, StepOutput};
+pub use host::{DEFAULT_COUNTDOWN, DEFAULT_MIN_PLAYERS};
+pub use io::{
+    Command, Diagnostic, Event, GameInfo, Limits, MatchPhase, PlayerId, PlayerSnap, RegionId, Snapshot, StepOutput,
+};
 pub use rules::{RuleSet, Rules};
 pub use vm::Vm;
 

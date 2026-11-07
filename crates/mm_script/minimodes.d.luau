@@ -124,7 +124,38 @@ declare Region: {
 	new: (a: Vector3, b: Vector3) -> Region,
 }
 
+-- Only in match games. The platform runs the flow: it waits for MinPlayers,
+-- counts down, starts (no one else may join), and after `End` shows the
+-- result and sends everyone back to the lobby. In a draft the flow moves only
+-- on `/match start` and `/match end`.
+export type Match = {
+	-- "Waiting", "Starting", "Started" or "Ended".
+	State: string,
+	-- Between 1 and MaxPlayers; 2 by default.
+	MinPlayers: number,
+	MaxPlayers: number,
+	-- Up to 60; 10 by default.
+	CountdownSeconds: number,
+	-- Fires with the countdown's length in seconds.
+	Starting: Signal<number>,
+	Started: Signal<()>,
+	Ended: Signal<{ Player }>,
+	End: (self: Match, winners: (Player | { Player })?) -> (),
+}
+
 declare game: {
+	GameId: number,
+	-- The published version running, or nil in a draft.
+	Version: number?,
+	IsDraft: boolean,
+	-- Persistent worlds: Unix time the world last unloaded (nil the first
+	-- time), so scripts can catch up on progress made offline.
+	LastShutdown: number?,
+	-- Runs when the instance shuts down (it emptied, or the match ended),
+	-- after its players have left. The instance waits up to 5 seconds for
+	-- callbacks to return.
+	BindToClose: (self: any, callback: () -> ()) -> (),
+	Match: Match?,
 	Players: {
 		PlayerAdded: Signal<Player>,
 		PlayerRemoving: Signal<Player>,

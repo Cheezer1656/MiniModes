@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use chunkedge::prelude::*;
+use mm_proto::GameKind;
 use mm_proto::ipc::DiagnosticLevel;
 use mm_world::BlockMirror;
 
@@ -13,6 +14,50 @@ use crate::rules::Rules;
 /// while the VM lives.
 pub type PlayerId = u32;
 pub type RegionId = u32;
+
+/// What scripts know about the game they run in (`game.GameId`, ...).
+#[derive(Clone, Debug)]
+pub struct GameInfo {
+    pub game_id: i64,
+    /// `None` in a draft.
+    pub version: Option<u32>,
+    pub kind: GameKind,
+    pub max_players: u32,
+    /// Persistent worlds: Unix seconds of the last unload.
+    pub last_shutdown: Option<i64>,
+}
+
+impl Default for GameInfo {
+    fn default() -> Self {
+        Self {
+            game_id: 0,
+            version: None,
+            kind: GameKind::Match,
+            max_players: 8,
+            last_shutdown: None,
+        }
+    }
+}
+
+/// Where a match is, as the host runs it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MatchPhase {
+    Waiting,
+    Starting,
+    Started,
+    Ended,
+}
+
+impl MatchPhase {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Waiting => "Waiting",
+            Self::Starting => "Starting",
+            Self::Started => "Started",
+            Self::Ended => "Ended",
+        }
+    }
+}
 
 /// Read-only player state as of the tick the step was spawned.
 #[derive(Clone, Debug)]
@@ -47,6 +92,11 @@ pub enum Event {
     BlockPlaced { player: PlayerId, pos: [i32; 3], old: BlockState, new: BlockState },
     Died { id: PlayerId },
     Respawned { id: PlayerId },
+    /// The match moved to `phase`. `seconds` is the countdown for `Starting`;
+    /// `winners` are set for `Ended`.
+    Match { phase: MatchPhase, seconds: u32, winners: Vec<PlayerId> },
+    /// The instance is shutting down: run `game:BindToClose` callbacks.
+    Closing,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +127,10 @@ pub enum Command {
     /// `region: None` sets the game-wide rules.
     SetRules { region: Option<(RegionId, mm_world::Bounds)>, rules: Rules },
     RemoveRegion(RegionId),
+    /// `game.Match.MinPlayers` / `CountdownSeconds` changed.
+    MatchSettings { min_players: u32, countdown: u32 },
+    /// `game.Match:End(winners)`.
+    EndMatch { winners: Vec<PlayerId> },
 }
 
 #[derive(Clone, Debug)]
@@ -130,4 +184,6 @@ pub struct StepOutput {
     pub next_timer: Option<u64>,
     /// The VM must be torn down (sustained overrun); the reason.
     pub fatal: Option<String>,
+    /// After [`Event::Closing`]: every `BindToClose` callback has returned.
+    pub closed: bool,
 }

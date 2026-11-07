@@ -42,6 +42,9 @@ pub enum Placement {
     New(ShardId),
     /// A persistent world's single instance is at capacity.
     Full,
+    /// A single-instance world is shutting down (saving); a new one can
+    /// start only after it ended.
+    Closing,
     NoShards,
 }
 
@@ -94,23 +97,34 @@ impl Directory {
     /// persistent world, has one instance; `preferred` is where a new one
     /// should go if that shard is connected.
     pub fn place(&self, game: GameId, version: GameVersion, kind: GameKind, preferred: Option<ShardId>) -> Placement {
+        let persistent = kind
+            == GameKind::OpenWorld {
+                persistent_world: true,
+            };
+        // A live world catches up to new versions in place, so any published
+        // instance of it is the one.
+        let matches = move |v: GameVersion| {
+            if persistent && version != GameVersion::Draft {
+                v != GameVersion::Draft
+            } else {
+                v == version
+            }
+        };
         let mut ofgame = self.shards.iter().flat_map(|(sid, shard)| {
             shard
                 .instances
                 .values()
-                .filter(move |i| i.status.spec.game == game && i.status.spec.version == version)
+                .filter(move |i| i.status.spec.game == game && matches(i.status.spec.version))
                 .map(move |i| (*sid, i))
         });
 
-        let single = version == GameVersion::Draft
-            || kind
-                == GameKind::OpenWorld {
-                    persistent_world: true,
-                };
+        let single = version == GameVersion::Draft || persistent;
         match kind {
             _ if single => {
                 if let Some((sid, instance)) = ofgame.next() {
-                    return if instance.has_room() {
+                    return if instance.status.started {
+                        Placement::Closing
+                    } else if instance.has_room() {
                         Placement::Existing(sid, instance.status.spec.id)
                     } else {
                         Placement::Full
@@ -250,8 +264,16 @@ mod tests {
         assert_eq!(dir.place(GameId(3), PUB, PERSISTENT, None), Placement::New(ShardId(1)));
         instance(&mut dir, 2, 20, 3, PERSISTENT, 7, false);
         assert_eq!(dir.place(GameId(3), PUB, PERSISTENT, None), Placement::Existing(ShardId(2), InstanceId(20)));
+        // Any published version: the live world updates in place.
+        assert_eq!(
+            dir.place(GameId(3), GameVersion::Published(2), PERSISTENT, None),
+            Placement::Existing(ShardId(2), InstanceId(20))
+        );
         dir.instance_mut(ShardId(2), InstanceId(20)).unwrap().status.players = 8;
         assert_eq!(dir.place(GameId(3), PUB, PERSISTENT, None), Placement::Full);
+        // Saving on its way out: wait for it to end.
+        dir.instance_mut(ShardId(2), InstanceId(20)).unwrap().status.started = true;
+        assert_eq!(dir.place(GameId(3), PUB, PERSISTENT, None), Placement::Closing);
     }
 
     #[test]

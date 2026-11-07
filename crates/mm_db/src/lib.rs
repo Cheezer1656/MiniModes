@@ -2,6 +2,7 @@
 //! runtime (no `DATABASE_URL` needed to build); migrations are embedded.
 
 pub mod editor;
+pub mod publish;
 
 use std::time::Duration;
 
@@ -70,6 +71,11 @@ pub struct GameRow {
     pub map_size: i32,
     pub draft_map_hash: Option<String>,
     pub created_unix: i64,
+    pub published_version: Option<i32>,
+    pub published_unix: Option<i64>,
+    /// Open worlds: save each player's inventory and position (settings
+    /// `save_player_state`, default on).
+    pub save_player_state: bool,
 }
 
 impl GameRow {
@@ -87,14 +93,17 @@ impl GameRow {
             kind: self.kind(),
             max_players: self.max_players as u32,
             featured: false,
-            published_at: self.created_unix,
+            published_at: self.published_unix.unwrap_or(self.created_unix),
+            version: self.published_version.unwrap_or(0) as u32,
             rating: None,
         }
     }
 }
 
 pub(crate) const GAME_COLUMNS: &str = "g.id, g.owner, p.username AS owner_name, g.name, g.description, g.icon, g.kind, \
-     g.max_players, g.map_size, g.draft_map_hash, extract(epoch FROM g.created_at)::bigint AS created_unix";
+     g.max_players, g.map_size, g.draft_map_hash, extract(epoch FROM g.created_at)::bigint AS created_unix, \
+     g.published_version, extract(epoch FROM g.first_published_at)::bigint AS published_unix, \
+     COALESCE((g.settings->>'save_player_state')::boolean, true) AS save_player_state";
 
 /// Records a login and returns the player's rank, if one was granted.
 pub async fn player_joined(pool: &PgPool, uuid: Uuid, username: &str) -> sqlx::Result<Option<String>> {
@@ -168,6 +177,27 @@ pub async fn owned_games(pool: &PgPool, owner: Uuid) -> sqlx::Result<Vec<GameRow
     .bind(owner)
     .fetch_all(pool)
     .await
+}
+
+/// Published games anyone can play, for the lobby's browser.
+pub async fn listed_games(pool: &PgPool) -> sqlx::Result<Vec<GameRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {GAME_COLUMNS} FROM games g JOIN players p ON p.uuid = g.owner
+         WHERE g.listed AND g.published_version IS NOT NULL ORDER BY g.first_published_at DESC"
+    ))
+    .fetch_all(pool)
+    .await
+}
+
+/// Changes one key of a game's `settings`.
+pub async fn set_game_setting(pool: &PgPool, game: i64, key: &str, value: serde_json::Value) -> sqlx::Result<()> {
+    sqlx::query("UPDATE games SET settings = jsonb_set(settings, ARRAY[$2], $3), updated_at = now() WHERE id = $1")
+        .bind(game)
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Points the draft at a newly saved map.

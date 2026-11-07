@@ -1,7 +1,8 @@
 //! Building in drafts: creative placing and breaking inside the map bounds,
 //! and WorldEdit-lite (`//wand //pos1 //pos2 //set //replace //copy //paste
 //! //undo`). Edits run as jobs drained at a fixed block budget per tick, so a
-//! large `//set` never stalls the shard.
+//! large `//set` never stalls the shard. `//region add|remove|list` marks
+//! the boxes a "scripts + regions" publish copies over a persistent world.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -14,12 +15,17 @@ use chunkedge::inventory::player_inventory::PlayerInventory;
 use chunkedge::prelude::*;
 use chunkedge::protocol::packets::play::BlockChangedAckS2c;
 use chunkedge::protocol::{VarInt, WritePacket};
+use mm_core::Tokio;
 use mm_script::Event;
 use mm_world::{Bounds, parse_state, state_name};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::instance::InInstance;
 use crate::script::{GameRules, ScriptHost};
-use crate::world::DraftWorld;
+use crate::world::{GameWorld, Storage};
+
+/// Largest box `//region add` accepts.
+const MAX_REGION_VOLUME: u64 = 16 << 20;
 
 const WAND: ItemKind = ItemKind::WoodenAxe;
 const UNDO_DEPTH: usize = 3;
@@ -98,6 +104,13 @@ impl EditJob {
 #[derive(Resource, Default)]
 struct EditQueue(VecDeque<EditJob>);
 
+/// Answers to `//region` commands, which need the database.
+#[derive(Resource)]
+struct RegionReplies {
+    tx: UnboundedSender<(Entity, String)>,
+    rx: UnboundedReceiver<(Entity, String)>,
+}
+
 /// Building and edit jobs; runs between the two script sets.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BuildSet;
@@ -106,12 +119,15 @@ pub struct BuildPlugin;
 
 impl Plugin for BuildPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<EditQueue>().add_systems(
-            Update,
-            (break_blocks, place_blocks, edit_commands, run_edit_jobs)
-                .chain()
-                .in_set(BuildSet),
-        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.init_resource::<EditQueue>()
+            .insert_resource(RegionReplies { tx, rx })
+            .add_systems(
+                Update,
+                (break_blocks, place_blocks, edit_commands, region_replies, run_edit_jobs)
+                    .chain()
+                    .in_set(BuildSet),
+            );
     }
 }
 
@@ -135,7 +151,7 @@ fn arr(p: BlockPos) -> [i32; 3] {
 
 type BuildLayer<'a> = (
     &'a mut ChunkLayer,
-    &'a mut DraftWorld,
+    &'a mut GameWorld,
     &'a GameRules,
     Option<&'a mut ScriptHost>,
 );
@@ -313,9 +329,12 @@ fn volume_hint(builder: &Builder) -> String {
 fn edit_commands(
     mut commands: MessageReader<CommandExecutionMessage>,
     mut players: Query<(&mut Client, Option<&InInstance>, &Position, &mut Inventory, &HeldItem, Option<&mut Builder>)>,
-    drafts: Query<&DraftWorld>,
+    drafts: Query<&GameWorld>,
     mut queue: ResMut<EditQueue>,
     limits: Res<EditLimits>,
+    storage: Res<Storage>,
+    replies: Res<RegionReplies>,
+    tokio: Res<Tokio>,
 ) {
     for cmd in commands.read() {
         // `//set stone` arrives as the command `/set stone`.
@@ -365,6 +384,22 @@ fn edit_commands(
                 reply(&mut client, msg);
                 None
             }
+            "region" => {
+                match region_command(&args, &builder, world) {
+                    Ok(op) => {
+                        let (db, tx, game, player) = (storage.db.clone(), replies.tx.clone(), world.game.0, cmd.executor);
+                        tokio.0.spawn(async move {
+                            let reply = op.run(&db, game).await.unwrap_or_else(|e| {
+                                tracing::error!("//region in game {game}: {e}");
+                                "§cCouldn't reach the database; try again.".into()
+                            });
+                            let _ = tx.send((player, reply));
+                        });
+                    }
+                    Err(msg) => reply(&mut client, format!("§c{msg}")),
+                }
+                None
+            }
             "set" | "replace" | "copy" | "paste" | "undo" => {
                 if builder.busy {
                     reply(&mut client, "§cYour previous edit is still running.".into());
@@ -396,11 +431,79 @@ fn edit_commands(
     }
 }
 
+enum RegionOp {
+    Add(String, mm_db::publish::Corners),
+    Remove(String),
+    List,
+}
+
+impl RegionOp {
+    async fn run(self, db: &mm_db::Pool, game: i64) -> Result<String, mm_db::Error> {
+        use mm_db::publish::{MAX_PUBLISH_REGIONS, delete_publish_region, publish_regions, set_publish_region};
+        Ok(match self {
+            Self::Add(name, corners) => {
+                if set_publish_region(db, game, &name, corners).await? {
+                    format!("§dSaved region §f{name}§d. \"Scripts + regions\" publishes copy it over the live world.")
+                } else {
+                    format!("§cA game can have at most {MAX_PUBLISH_REGIONS} regions.")
+                }
+            }
+            Self::Remove(name) => {
+                if delete_publish_region(db, game, &name).await? {
+                    format!("§dRemoved region §f{name}§d.")
+                } else {
+                    format!("§cNo region called {name}.")
+                }
+            }
+            Self::List => {
+                let regions = publish_regions(db, game).await?;
+                if regions.is_empty() {
+                    "§7No regions yet. Select a box and use §f//region add <name>§7.".into()
+                } else {
+                    let list: Vec<_> = regions
+                        .iter()
+                        .map(|(name, (a, b))| format!("§f{name} §8{a:?}..{b:?}"))
+                        .collect();
+                    format!("§dRegions: {}", list.join("§7, "))
+                }
+            }
+        })
+    }
+}
+
+fn region_command(args: &[&str], builder: &Builder, world: &GameWorld) -> Result<RegionOp, String> {
+    let valid = |name: &str| {
+        (1..=32).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    match args {
+        ["add", name] if valid(name) => {
+            let sel = builder.selection().ok_or("Select a box first (//wand or //pos1 and //pos2).")?;
+            let sel = sel.intersect(&world.mirror.bounds).ok_or("The selection is outside the map.")?;
+            if sel.volume() > MAX_REGION_VOLUME {
+                return Err(format!("Regions can be at most {MAX_REGION_VOLUME} blocks."));
+            }
+            Ok(RegionOp::Add(name.to_string(), (sel.min, sel.max.map(|c| c - 1))))
+        }
+        ["remove", name] if valid(name) => Ok(RegionOp::Remove(name.to_string())),
+        ["add" | "remove", _] => Err("Region names use letters, digits, - and _ (up to 32).".into()),
+        ["list"] | [] => Ok(RegionOp::List),
+        _ => Err("Usage: //region add <name>, //region remove <name> or //region list".into()),
+    }
+}
+
+fn region_replies(mut replies: ResMut<RegionReplies>, mut clients: Query<&mut Client>) {
+    while let Ok((player, msg)) = replies.rx.try_recv() {
+        if let Ok(mut client) = clients.get_mut(player) {
+            client.send_chat_message(msg);
+        }
+    }
+}
+
 fn plan_edit(
     name: &str,
     args: &[&str],
     builder: &Builder,
-    world: &DraftWorld,
+    world: &GameWorld,
     here: [i32; 3],
     limits: &EditLimits,
 ) -> Result<JobKind, String> {
@@ -448,7 +551,7 @@ fn plan_edit(
 
 fn run_edit_jobs(
     mut queue: ResMut<EditQueue>,
-    mut layers: Query<(&mut ChunkLayer, &mut DraftWorld, Option<&mut ScriptHost>)>,
+    mut layers: Query<(&mut ChunkLayer, &mut GameWorld, Option<&mut ScriptHost>)>,
     mut players: Query<(&mut Client, &mut Builder)>,
     limits: Res<EditLimits>,
 ) {
@@ -510,7 +613,7 @@ fn run_edit_jobs(
 
 fn apply(
     layer: &mut ChunkLayer,
-    world: &mut DraftWorld,
+    world: &mut GameWorld,
     p: [i32; 3],
     to: BlockState,
     changes: &mut Vec<([i32; 3], BlockState)>,

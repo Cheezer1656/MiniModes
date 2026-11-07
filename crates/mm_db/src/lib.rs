@@ -176,3 +176,25 @@ pub async fn set_draft_map(pool: &PgPool, game: i64, hash: &str) -> sqlx::Result
         .await?;
     Ok(())
 }
+
+/// A draft's scripts as `(path, source)`, sorted by path.
+pub async fn draft_files(pool: &PgPool, game: i64) -> sqlx::Result<Vec<(String, String)>> {
+    sqlx::query_as("SELECT path, source FROM draft_files WHERE game = $1 ORDER BY path")
+        .bind(game)
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn put_draft_file(pool: &PgPool, game: i64, path: &str, source: &str, by: Option<Uuid>) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO draft_files (game, path, source, updated_by) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (game, path) DO UPDATE SET source = $3, updated_by = $4, updated_at = now()",
+    )
+    .bind(game)
+    .bind(path)
+    .bind(source)
+    .bind(by)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

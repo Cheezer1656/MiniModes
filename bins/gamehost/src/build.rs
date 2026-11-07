@@ -14,9 +14,11 @@ use chunkedge::inventory::player_inventory::PlayerInventory;
 use chunkedge::prelude::*;
 use chunkedge::protocol::packets::play::BlockChangedAckS2c;
 use chunkedge::protocol::{VarInt, WritePacket};
+use mm_script::Event;
 use mm_world::{Bounds, parse_state, state_name};
 
 use crate::instance::InInstance;
+use crate::script::{GameRules, ScriptHost};
 use crate::world::DraftWorld;
 
 const WAND: ItemKind = ItemKind::WoodenAxe;
@@ -96,6 +98,10 @@ impl EditJob {
 #[derive(Resource, Default)]
 struct EditQueue(VecDeque<EditJob>);
 
+/// Building and edit jobs; runs between the two script sets.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BuildSet;
+
 pub struct BuildPlugin;
 
 impl Plugin for BuildPlugin {
@@ -104,7 +110,7 @@ impl Plugin for BuildPlugin {
             Update,
             (break_blocks, place_blocks, edit_commands, run_edit_jobs)
                 .chain()
-                .after(crate::instance::InstanceSet),
+                .in_set(BuildSet),
         );
     }
 }
@@ -127,31 +133,53 @@ fn arr(p: BlockPos) -> [i32; 3] {
     [p.x, p.y, p.z]
 }
 
+type BuildLayer<'a> = (
+    &'a mut ChunkLayer,
+    &'a mut DraftWorld,
+    &'a GameRules,
+    Option<&'a mut ScriptHost>,
+);
+
+/// Creative players break instantly and ignore rules; others break when
+/// digging finishes, if the rules allow it.
 fn break_blocks(
     mut messages: MessageReader<DiggingMessage>,
-    mut players: Query<(&mut Client, &InInstance, &GameMode, &Inventory, &HeldItem, &mut Builder)>,
-    mut layers: Query<(&mut ChunkLayer, &mut DraftWorld)>,
+    mut players: Query<(&mut Client, &InInstance, &GameMode, &Inventory, &HeldItem, Option<&mut Builder>)>,
+    mut layers: Query<BuildLayer>,
 ) {
     for msg in messages.read() {
-        let Ok((mut client, in_instance, mode, inventory, held, mut builder)) = players.get_mut(msg.client) else {
+        let Ok((mut client, in_instance, mode, inventory, held, builder)) = players.get_mut(msg.client) else {
             continue;
         };
-        if *mode != GameMode::Creative || msg.state != DiggingState::Start {
+        let creative = *mode == GameMode::Creative;
+        let finished = match msg.state {
+            DiggingState::Start => creative,
+            DiggingState::Stop => !creative,
+            _ => false,
+        };
+        if !finished {
             continue;
         }
         let pos = arr(msg.position);
         // The client's predicted break is rolled back by the dig ack unless the
         // block really changes.
-        if inventory.slot(held.slot()).item == WAND {
+        if let Some(mut builder) = builder.filter(|_| creative && inventory.slot(held.slot()).item == WAND) {
             builder.pos1 = Some(pos);
             client.send_chat_message(format!("§dPosition 1 set to {pos:?}{}", volume_hint(&builder)));
             continue;
         }
-        let Ok((mut layer, mut world)) = layers.get_mut(in_instance.0) else {
+        let Ok((mut layer, mut world, rules, host)) = layers.get_mut(in_instance.0) else {
             continue;
         };
+        let old = world.mirror.get(pos);
+        if old.is_air() || !(creative || rules.0.may_break(pos, old.to_kind())) {
+            continue;
+        }
         if world.mirror.set(pos, BlockState::AIR).is_some() {
             layer.set_block(msg.position, BlockState::AIR);
+            if let Some(mut host) = host {
+                host.player_event(msg.client, |player| Event::BlockBroken { player, pos, old });
+            }
         }
     }
 }
@@ -159,12 +187,20 @@ fn break_blocks(
 #[allow(clippy::too_many_arguments)]
 fn place_blocks(
     mut messages: MessageReader<InteractBlockMessage>,
-    mut players: Query<(&mut Client, &InInstance, &GameMode, &Inventory, &HeldItem, &Look, &mut Builder)>,
-    mut layers: Query<(&mut ChunkLayer, &mut DraftWorld)>,
+    mut players: Query<(
+        &mut Client,
+        &InInstance,
+        &GameMode,
+        &mut Inventory,
+        &HeldItem,
+        &Look,
+        Option<&mut Builder>,
+    )>,
+    mut layers: Query<BuildLayer>,
     mut swings: HandSwingWriter,
 ) {
     for msg in messages.read() {
-        let Ok((mut client, in_instance, mode, inventory, held, look, mut builder)) = players.get_mut(msg.client)
+        let Ok((mut client, in_instance, mode, mut inventory, held, look, builder)) = players.get_mut(msg.client)
         else {
             continue;
         };
@@ -173,15 +209,16 @@ fn place_blocks(
         client.write_packet(&BlockChangedAckS2c {
             sequence: VarInt(msg.sequence),
         });
-        if *mode != GameMode::Creative {
+        let creative = *mode == GameMode::Creative;
+        if !matches!(*mode, GameMode::Creative | GameMode::Survival) {
             continue;
         }
         let slot = match msg.hand {
             Hand::Main => held.slot(),
             Hand::Off => PlayerInventory::SLOT_OFFHAND,
         };
-        let stack = inventory.slot(slot);
-        if stack.item == WAND {
+        let stack = inventory.slot(slot).clone();
+        if let Some(mut builder) = builder.filter(|_| creative && stack.item == WAND) {
             if msg.hand == Hand::Main {
                 builder.pos2 = Some(arr(msg.position));
                 client.send_chat_message(format!("§dPosition 2 set to {:?}{}", arr(msg.position), volume_hint(&builder)));
@@ -191,7 +228,7 @@ fn place_blocks(
         let Some(kind) = BlockKind::from_item_kind(stack.item) else {
             continue;
         };
-        let Ok((mut layer, mut world)) = layers.get_mut(in_instance.0) else {
+        let Ok((mut layer, mut world, rules, host)) = layers.get_mut(in_instance.0) else {
             continue;
         };
         let clicked = arr(msg.position);
@@ -200,13 +237,29 @@ fn place_blocks(
         } else {
             arr(msg.position.get_in_direction(msg.face))
         };
-        if !world.mirror.get(target).is_replaceable() {
+        let old = world.mirror.get(target);
+        if !old.is_replaceable() || !(creative || rules.0.may_place(target, kind)) {
             continue;
         }
         let state = oriented(kind, msg.face, look.yaw);
         if world.mirror.set(target, state).is_some() {
             layer.set_block(block_pos(target), state);
             swings.swing(msg.client, msg.hand);
+            if !creative {
+                if stack.count > 1 {
+                    inventory.set_slot_amount(slot, stack.count - 1);
+                } else {
+                    inventory.set_slot(slot, ItemStack::EMPTY);
+                }
+            }
+            if let Some(mut host) = host {
+                host.player_event(msg.client, |player| Event::BlockPlaced {
+                    player,
+                    pos: target,
+                    old,
+                    new: state,
+                });
+            }
         }
     }
 }
@@ -395,7 +448,7 @@ fn plan_edit(
 
 fn run_edit_jobs(
     mut queue: ResMut<EditQueue>,
-    mut layers: Query<(&mut ChunkLayer, &mut DraftWorld)>,
+    mut layers: Query<(&mut ChunkLayer, &mut DraftWorld, Option<&mut ScriptHost>)>,
     mut players: Query<(&mut Client, &mut Builder)>,
     limits: Res<EditLimits>,
 ) {
@@ -404,11 +457,14 @@ fn run_edit_jobs(
         let Some(job) = queue.0.front_mut() else {
             return;
         };
-        let Ok((mut layer, mut world)) = layers.get_mut(job.layer) else {
+        let Ok((mut layer, mut world, host)) = layers.get_mut(job.layer) else {
             // The instance stopped; drop the job.
             queue.0.pop_front();
             continue;
         };
+        if let Some(mut host) = host.filter(|_| !matches!(job.kind, JobKind::Copy { .. })) {
+            host.mark_resync();
+        }
         let end = (job.cursor + budget).min(job.len());
         let EditJob {
             kind, cursor, changes, ..

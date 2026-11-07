@@ -14,3 +14,10 @@ tokio_workers = 1
 compute = 1
 async_compute = 2
 io = 1
+
+[scripts]
+memory_mb = 64
+slice_ms = 2.0
+max_overrun_ticks = 100
+max_fill_volume = 262144
+blocks_per_tick = 8192

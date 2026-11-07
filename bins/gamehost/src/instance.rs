@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use chunkedge::command::manager::CommandExecutionMessage;
+use chunkedge::message::ChatReceivedMessage;
 use chunkedge::prelude::*;
 use chunkedge::UniqueId;
 use mm_core::Tokio;
@@ -105,6 +106,7 @@ impl Plugin for InstancePlugin {
                     place_arrivals,
                     evacuate_orphans,
                     lobby_commands,
+                    instance_chat,
                     send_to_lobby,
                     return_from_void,
                     unload_idle,
@@ -285,6 +287,22 @@ fn place_arrivals(
                     );
                 }
             }
+        }
+    }
+}
+
+/// Chat reaches the other players in the same instance.
+fn instance_chat(
+    mut messages: MessageReader<ChatReceivedMessage>,
+    players: Query<(&InInstance, &Username)>,
+    mut layers: Query<&mut ChunkLayer, With<Instance>>,
+) {
+    for msg in messages.read() {
+        let Ok((in_instance, name)) = players.get(msg.client) else {
+            continue;
+        };
+        if let Ok(mut layer) = layers.get_mut(in_instance.0) {
+            layer.send_chat_message(format!("§7{}§8: §f{}", name.0, msg.message));
         }
     }
 }

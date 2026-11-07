@@ -473,6 +473,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1609,11 +1619,13 @@ name = "gamehost"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bevy_tasks",
  "chunkedge",
  "mm_core",
  "mm_db",
  "mm_gate",
  "mm_proto",
+ "mm_script",
  "mm_world",
  "serde",
  "tokio",
@@ -2206,6 +2218,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "luau0-src"
+version = "0.22.0+luau740"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ea012e8a8aaff2f7b6c788fad41a60630003b6a0932bcf045f7d14952c9bd31"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2252,6 +2273,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "mlua"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a7ae6b65bf54b7fdd4cf5b6f44f60862350ebf3fe3779b3a9cc005e7fa14f81"
+dependencies = [
+ "bstr",
+ "either",
+ "libc",
+ "mlua-sys",
+ "num-traits",
+ "parking_lot",
+ "rustc-hash",
+]
+
+[[package]]
+name = "mlua-sys"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1631cda17bd6486410ab751d91f5fd4484f441589278cdad879eb3afc721a285"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "luau0-src",
+ "pkg-config",
+]
+
+[[package]]
 name = "mm_core"
 version = "0.1.0"
 dependencies = [
@@ -2294,6 +2343,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm_script"
+version = "0.1.0"
+dependencies = [
+ "chunkedge",
+ "mlua",
+ "mm_proto",
+ "mm_world",
+]
+
+[[package]]
 name = "mm_ui"
 version = "0.1.0"
 dependencies = [
@@ -2320,6 +2379,7 @@ dependencies = [
  "chunkedge",
  "chunkedge_binary",
  "hmac 0.13.0",
+ "mm_db",
  "serde_json",
  "sha2 0.11.1",
  "tokio",

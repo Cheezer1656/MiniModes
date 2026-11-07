@@ -4,6 +4,7 @@ mod build;
 mod config;
 mod instance;
 mod link;
+mod script;
 mod world;
 
 use std::time::Duration;
@@ -12,8 +13,11 @@ use chunkedge::prelude::*;
 use mm_core::BackendSettings;
 use mm_gate::GateClient;
 
+use crate::build::BuildSet;
 use crate::config::GamehostConfig;
-use crate::instance::IdleUnload;
+use crate::instance::{IdleUnload, InstanceSet};
+use crate::script::ScriptSet;
+use crate::world::WorldSet;
 use crate::link::{GateLink, ShutdownRequests};
 
 fn main() -> anyhow::Result<()> {
@@ -57,7 +61,17 @@ fn main() -> anyhow::Result<()> {
             max_volume: config.max_edit_volume,
             blocks_per_tick: config.edit_blocks_per_tick,
         })
-        .add_plugins((instance::InstancePlugin, world::WorldPlugin, build::BuildPlugin))
+        .insert_resource(config.scripts.script_config())
+        .configure_sets(
+            Update,
+            (InstanceSet, WorldSet, ScriptSet::Apply, BuildSet, ScriptSet::Spawn).chain(),
+        )
+        .add_plugins((
+            instance::InstancePlugin,
+            world::WorldPlugin,
+            build::BuildPlugin,
+            script::ScriptPlugin,
+        ))
         .run();
 
     drop(runtime);

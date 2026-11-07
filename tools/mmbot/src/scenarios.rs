@@ -247,23 +247,7 @@ pub async fn drafts(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result<
     let name = format!("b{}", std::process::id() % 100_000);
     let game = format!("Draft {name}");
 
-    println!("{name}: create \"{game}\"");
-    let mut bot = Bot::connect_forwarded(lobby, &name, &secret).await?;
-    expect(&mut bot, "lobby spawn", |e| matches!(e, BotEvent::Teleported(_))).await?;
-    // The account loads asynchronously after join.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    bot.select_hotbar(1).await?;
-    bot.use_item().await?;
-    expect_menu(&mut bot, "My Games").await?;
-    bot.click(50, 0).await?;
-    expect_menu(&mut bot, "Create a Game").await?;
-    bot.click(13, 0).await?;
-    expect_menu(&mut bot, "Pick an Icon").await?;
-    bot.click(10, 0).await?;
-    expect_chat(&mut bot, "Type a name").await?;
-    bot.chat(&game).await?;
-    expect_chat(&mut bot, "Created").await?;
-
+    let bot = create_game(lobby, &name, &game, &secret).await?;
     let mut bot = open_draft(&mut gate, bot, &name, &game, &secret).await?;
     println!("build: 5×5 glass at y=65");
     select_square(&mut bot).await?;
@@ -298,6 +282,129 @@ pub async fn drafts(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result<
     expect_chat(&mut bot, "Unknown block").await?;
 
     println!("drafts scenario passed");
+    Ok(())
+}
+
+/// Joins the lobby as `name` and creates a game called `game` through the
+/// My Games menu.
+async fn create_game(lobby: SocketAddr, name: &str, game: &str, secret: &str) -> anyhow::Result<Bot> {
+    println!("{name}: create \"{game}\"");
+    let mut bot = Bot::connect_forwarded(lobby, name, secret).await?;
+    expect(&mut bot, "lobby spawn", |e| matches!(e, BotEvent::Teleported(_))).await?;
+    // The account loads asynchronously after join.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bot.select_hotbar(1).await?;
+    bot.use_item().await?;
+    expect_menu(&mut bot, "My Games").await?;
+    bot.click(50, 0).await?;
+    expect_menu(&mut bot, "Create a Game").await?;
+    bot.click(13, 0).await?;
+    expect_menu(&mut bot, "Pick an Icon").await?;
+    bot.click(10, 0).await?;
+    expect_chat(&mut bot, "Type a name").await?;
+    bot.chat(game).await?;
+    expect_chat(&mut bot, "Created").await?;
+    Ok(bot)
+}
+
+const SCRIPT_MAIN: &str = r#"
+local util = require("lib/util")
+
+-- Only the grass in the 3x3 "mine" may be broken, by survival players.
+local mine = Region.new(Vector3.new(2, 64, 2), Vector3.new(4, 64, 4))
+mine.Rules.CanBreak = true
+mine.Rules.BreakableBlocks = { "grass_block" }
+
+game.Players.PlayerAdded:Connect(function(player)
+    player:SendMessage(util.greet(player.Name))
+    player.Chatted:Connect(function(message)
+        if message == "ping" then
+            task.wait(0.25)
+            player:SendMessage("pong at y=" .. math.floor(player.Position.Y))
+        elseif message == "survival" then
+            player.GameMode = "survival"
+            task.wait()
+            player:SendMessage("mode " .. player.GameMode)
+        end
+    end)
+end)
+
+game.World.BlockBroken:Connect(function(event)
+    event.Player:SendMessage("broke " .. event.Block .. " at " .. tostring(event.Position))
+end)
+"#;
+
+const SCRIPT_UTIL: &str = r#"
+local util = {}
+function util.greet(name) return "Welcome to the script test, " .. name .. "!" end
+return util
+"#;
+
+const SCRIPT_RUNAWAY: &str = r#"
+print("v2 loaded")
+task.spawn(function() while true do end end)
+"#;
+
+/// Scripts in a draft: load from Postgres, greet the player, answer chat,
+/// see block breaks, enforce region rules, reload, and stop a runaway loop
+/// without stalling the shard. Needs the lobby, a gamehost and Postgres.
+pub async fn scripts(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result<()> {
+    let secret = std::env::var("MINIMODES_VELOCITY_SECRET").context("MINIMODES_VELOCITY_SECRET must be set")?;
+    let db = mm_db::connect(&mm_db::url_from_env()?, 2).await?;
+    let mut gate = mock_gate::start(gate_bind, lobby).await?;
+    wait_for_network(&gate, lobby).await?;
+    let name = format!("s{}", std::process::id() % 100_000);
+    let game = format!("Scripts {name}");
+
+    let bot = create_game(lobby, &name, &game, &secret).await?;
+    let owned = mm_db::owned_games(&db, bot_uuid(&name)).await?;
+    let id = owned.iter().find(|g| g.name == game).context("created game not in the database")?.id;
+    println!("upload main.luau + lib/util.luau to game {id}");
+    mm_db::put_draft_file(&db, id, "main.luau", SCRIPT_MAIN, None).await?;
+    mm_db::put_draft_file(&db, id, "lib/util.luau", SCRIPT_UTIL, None).await?;
+
+    let mut bot = open_draft(&mut gate, bot, &name, &game, &secret).await?;
+    expect_chat(&mut bot, "Scripts started").await?;
+    expect_chat(&mut bot, &format!("Welcome to the script test, {name}!")).await?;
+
+    bot.chat("ping").await?;
+    expect_chat(&mut bot, "pong at y=65").await?;
+
+    println!("creative break outside the mine: allowed, and the script sees it");
+    bot.dig([1, 64, 1], false).await?;
+    expect_chat(&mut bot, "broke grass_block at 1, 64, 1").await?;
+
+    println!("survival: rules forbid breaking outside the mine");
+    bot.chat("survival").await?;
+    expect_chat(&mut bot, "mode survival").await?;
+    bot.dig([6, 64, 6], true).await?;
+    bot.chat("ping").await?;
+    let reply = expect(&mut bot, "pong or break", |e| {
+        matches!(e, BotEvent::Chat(m) if m.contains("pong") || m.contains("broke"))
+    })
+    .await?;
+    anyhow::ensure!(matches!(&reply, BotEvent::Chat(m) if m.contains("pong")), "forbidden break went through: {reply:?}");
+    bot.dig([3, 64, 3], true).await?;
+    expect_chat(&mut bot, "broke grass_block at 3, 64, 3").await?;
+
+    println!("reload with a runaway loop; the shard keeps responding and stops it");
+    mm_db::put_draft_file(&db, id, "main.luau", SCRIPT_RUNAWAY, None).await?;
+    bot.command("script reload").await?;
+    expect_chat(&mut bot, "v2 loaded").await?;
+    let started = std::time::Instant::now();
+    bot.chat("still here").await?;
+    expect_chat(&mut bot, "still here").await?;
+    anyhow::ensure!(started.elapsed() < Duration::from_secs(2), "chat stalled behind the runaway script");
+    // 100 ticks of overrun, so longer than one step's timeout.
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(15),
+        bot.wait_for(|e| matches!(e, BotEvent::Chat(m) if m.contains("Scripts stopped"))),
+    )
+    .await
+    .context("the runaway script was never stopped")??;
+    println!("  after {:.1}s: {stopped:?}", started.elapsed().as_secs_f32());
+
+    println!("scripts scenario passed");
     Ok(())
 }
 

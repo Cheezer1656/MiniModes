@@ -80,6 +80,10 @@ impl SaveLocks {
     }
 }
 
+/// Map loading and saving; runs after the instance systems.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WorldSet;
+
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
@@ -98,7 +102,7 @@ impl Plugin for WorldPlugin {
                     answer_shutdown,
                 )
                     .chain()
-                    .after(crate::instance::InstanceSet),
+                    .in_set(WorldSet),
             );
     }
 }

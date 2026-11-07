@@ -6,12 +6,14 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bevy_tasks = { version = "0.19.1", default-features = false }
 chunkedge.workspace = true
 mm_core.workspace = true
 mm_db.workspace = true
 mm_world.workspace = true
 mm_gate.workspace = true
 mm_proto.workspace = true
+mm_script.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true

@@ -1,8 +1,12 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use mm_core::ThreadConfig;
 use mm_proto::ipc::ShardId;
+use mm_script::Limits;
 use serde::Deserialize;
+
+use crate::script::ScriptConfig;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +39,50 @@ pub struct GamehostConfig {
     pub edit_blocks_per_tick: usize,
     #[serde(default)]
     pub threads: ThreadConfig,
+    #[serde(default)]
+    pub scripts: ScriptSettings,
+}
+
+/// Per-VM script limits. Memory will come from the owner's rank later.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScriptSettings {
+    pub memory_mb: usize,
+    /// CPU time per tick before running script threads are yielded.
+    pub slice_ms: f64,
+    /// Ticks in a row a VM may use its whole slice before it's stopped.
+    pub max_overrun_ticks: u32,
+    pub max_fill_volume: u64,
+    /// Script block writes applied per instance per tick.
+    pub blocks_per_tick: usize,
+}
+
+impl Default for ScriptSettings {
+    fn default() -> Self {
+        let limits = Limits::default();
+        Self {
+            memory_mb: limits.memory >> 20,
+            slice_ms: limits.slice.as_secs_f64() * 1000.0,
+            max_overrun_ticks: limits.max_overrun_steps,
+            max_fill_volume: limits.max_fill_volume,
+            blocks_per_tick: 8192,
+        }
+    }
+}
+
+impl ScriptSettings {
+    pub fn script_config(&self) -> ScriptConfig {
+        ScriptConfig {
+            limits: Limits {
+                memory: self.memory_mb << 20,
+                slice: Duration::from_secs_f64(self.slice_ms.max(0.1) / 1000.0),
+                max_overrun_steps: self.max_overrun_ticks,
+                max_fill_volume: self.max_fill_volume,
+                ..Limits::default()
+            },
+            blocks_per_tick: self.blocks_per_tick.max(1),
+        }
+    }
 }
 
 fn default_data_dir() -> std::path::PathBuf {

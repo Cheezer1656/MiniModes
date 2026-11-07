@@ -9,6 +9,7 @@ anyhow.workspace = true
 chunkedge.workspace = true
 chunkedge_binary.workspace = true
 hmac = "0.13.0"
+mm_db.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.0"
 tokio.workspace = true

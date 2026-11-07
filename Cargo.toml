@@ -22,6 +22,8 @@ reqwest = { version = "0.13.2", default-features = false, features = ["json"] }
 serde_json = "1.0.128"
 uuid = { version = "1.10.0", features = ["serde"] }
 zstd = "0.13.2"
+# Luau with native codegen; `send` lets a VM move between task-pool threads.
+mlua = { version = "0.12.2", features = ["luau", "luau-jit", "send"] }
 sqlx = { version = "0.8.2", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid", "json"] }
 mm_core = { path = "crates/mm_core" }
 mm_ui = { path = "crates/mm_ui" }
@@ -29,6 +31,7 @@ mm_proto = { path = "crates/mm_proto" }
 mm_gate = { path = "crates/mm_gate" }
 mm_world = { path = "crates/mm_world" }
 mm_db = { path = "crates/mm_db" }
+mm_script = { path = "crates/mm_script" }
 
 [profile.dev]
 opt-level = 1

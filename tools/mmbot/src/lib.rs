@@ -239,6 +239,28 @@ impl Bot {
         self.flush().await
     }
 
+    /// Starts digging the block at `pos`, and with `finish` reports it broken
+    /// (what a survival client sends once digging completes).
+    pub async fn dig(&mut self, pos: [i32; 3], finish: bool) -> anyhow::Result<()> {
+        use chunkedge::protocol::packets::play::player_action_c2s::PlayerAction;
+        use chunkedge::protocol::{BlockPos, Direction};
+        let actions: &[PlayerAction] = if finish {
+            &[PlayerAction::StartDestroyBlock, PlayerAction::StopDestroyBlock]
+        } else {
+            &[PlayerAction::StartDestroyBlock]
+        };
+        for &action in actions {
+            self.sequence += 1;
+            self.enc.append_packet(&play::PlayerActionC2s {
+                action,
+                position: BlockPos::new(pos[0], pos[1], pos[2]),
+                direction: Direction::Up,
+                sequence: VarInt(self.sequence),
+            })?;
+        }
+        self.flush().await
+    }
+
     /// Right-clicks an entity.
     pub async fn interact(&mut self, entity_id: i32) -> anyhow::Result<()> {
         self.enc.append_packet(&play::InteractC2s {

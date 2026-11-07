@@ -6,6 +6,8 @@
 //!   the real lobby and gamehost, with a mock Gate API (see `mock_gate`).
 //! - `mmbot drafts <lobby_addr> [gate_api_bind]`: create a game, build in its
 //!   draft, and check the build survives an unload (same setup, plus Postgres).
+//! - `mmbot scripts <lobby_addr> [gate_api_bind]`: run Luau scripts in a draft:
+//!   events, chat, rules, reload, and a runaway script being stopped.
 
 mod mock_gate;
 mod scenarios;
@@ -35,7 +37,11 @@ async fn main() -> anyhow::Result<()> {
             let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
             scenarios::drafts(addr, gate).await
         }
-        other => anyhow::bail!("unknown mode `{other}` (expected join | lobby-ui | handoff | drafts)"),
+        "scripts" => {
+            let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
+            scenarios::scripts(addr, gate).await
+        }
+        other => anyhow::bail!("unknown mode `{other}` (expected join | lobby-ui | handoff | drafts | scripts)"),
     }
 }
 

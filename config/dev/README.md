@@ -30,3 +30,15 @@ cargo run -p mmbot -- handoff 127.0.0.1:25600 127.0.0.1:8090
 `mmbot drafts` (same setup) creates a game through My Games, builds with
 `//set`, leaves, and checks the blocks are still there after the draft
 unloads and reopens.
+
+## Scripts
+
+A draft runs its Luau scripts (`draft_files` in Postgres; `main.luau` is the
+entry, see `crates/mm_script/minimodes.d.luau` for the API) once its map
+loads. Until the web editor exists, put files in with SQL or
+`mm_db::put_draft_file`, then `/script reload` in the draft (`/script stop`
+stops them). Script output shows in the draft's chat.
+
+`mmbot scripts` (same setup as `drafts`) uploads a small game, checks
+events, chat, region rules and reload, and that a runaway loop is stopped
+without stalling the shard.

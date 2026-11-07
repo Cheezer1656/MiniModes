@@ -6,6 +6,7 @@ mod coordinator;
 mod join;
 mod menus;
 mod ui;
+mod web;
 mod world;
 
 use chunkedge::prelude::*;
@@ -29,6 +30,7 @@ fn main() -> anyhow::Result<()> {
         "[ranks] must define `{}`",
         account::DEFAULT_RANK
     );
+    let web = config.web.clone();
     let catalog = GameCatalog::new(config.games.iter().map(|g| g.summary()).collect());
 
     let mut app = App::new();
@@ -58,6 +60,7 @@ fn main() -> anyhow::Result<()> {
             ui::LobbyUiPlugin,
             chat::ChatPlugin,
             join::JoinPlugin,
+            web::WebPlugin { config: web },
         ))
         .run();
 

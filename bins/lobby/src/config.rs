@@ -32,6 +32,8 @@ pub struct LobbyConfig {
     /// Build limits per rank; players without a rank row are `member`.
     #[serde(default = "crate::account::default_ranks")]
     pub ranks: HashMap<String, crate::account::RankLimits>,
+    /// The web script editor; unset disables it.
+    pub web: Option<crate::web::WebConfig>,
     /// Games listed without a database (development only).
     #[serde(default, rename = "game")]
     pub games: Vec<GameConfig>,

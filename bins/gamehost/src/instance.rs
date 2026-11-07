@@ -159,6 +159,7 @@ fn apply_lobby_messages(
     dimensions: Res<DimensionTypeRegistry>,
     biomes: Res<BiomeRegistry>,
     mut stops: Local<Vec<InstanceId>>,
+    mut reloads: MessageWriter<crate::script::ReloadDraft>,
 ) {
     while let Ok(msg) = link.inbox.try_recv() {
         match msg {
@@ -205,6 +206,9 @@ fn apply_lobby_messages(
             LobbyMsg::StopInstance { instance } => stops.push(instance),
             LobbyMsg::KillGame { game } => {
                 stops.extend(layers.iter().filter(|i| i.spec.game == game).map(|i| i.spec.id));
+            }
+            LobbyMsg::ReloadDraft { game, by } => {
+                reloads.write(crate::script::ReloadDraft { game, by });
             }
         }
     }

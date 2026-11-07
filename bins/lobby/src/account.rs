@@ -50,6 +50,10 @@ pub fn default_ranks() -> HashMap<String, RankLimits> {
 #[derive(Resource, Clone)]
 pub struct Db(pub Pool);
 
+/// Reload a player's rank and games (e.g. they were invited to collaborate).
+#[derive(Message, Clone, Copy)]
+pub struct RefreshAccount(pub Entity);
+
 /// A player finished the create flow.
 #[derive(Message, Clone)]
 pub struct CreateGameRequest {
@@ -64,6 +68,7 @@ enum DbEvent {
         client: Entity,
         rank: Option<String>,
         owned: Vec<GameSummary>,
+        shared: Vec<GameSummary>,
     },
     Created {
         client: Entity,
@@ -88,30 +93,36 @@ impl Plugin for AccountPlugin {
         let (tx, rx) = mpsc::unbounded_channel();
         app.insert_resource(DbEvents { tx, rx })
             .add_message::<CreateGameRequest>()
+            .add_message::<RefreshAccount>()
             .add_systems(Update, (load_accounts, create_games, apply_db_events));
     }
 }
 
 fn load_accounts(
-    clients: Query<(Entity, &UniqueId, &Username), Added<Client>>,
+    joined: Query<(Entity, &UniqueId, &Username), Added<Client>>,
+    clients: Query<(Entity, &UniqueId, &Username), With<Client>>,
+    mut refreshes: MessageReader<RefreshAccount>,
     db: Res<Db>,
     events: Res<DbEvents>,
     tokio: Res<Tokio>,
 ) {
-    for (client, uuid, username) in &clients {
+    let refreshed = refreshes.read().filter_map(|r| clients.get(r.0).ok());
+    for (client, uuid, username) in joined.iter().chain(refreshed) {
         let (pool, tx, uuid, name) = (db.0.clone(), events.tx.clone(), uuid.0, username.0.clone());
         tokio.0.spawn(async move {
             let result = async {
                 let rank = mm_db::player_joined(&pool, uuid, &name).await?;
                 let owned = mm_db::owned_games(&pool, uuid).await?;
-                Ok::<_, sqlx::Error>((rank, owned))
+                let shared = mm_db::editor::shared_games(&pool, uuid).await?;
+                Ok::<_, sqlx::Error>((rank, owned, shared))
             }
             .await;
             let _ = tx.send(match result {
-                Ok((rank, owned)) => DbEvent::Loaded {
+                Ok((rank, owned, shared)) => DbEvent::Loaded {
                     client,
                     rank,
                     owned: owned.iter().map(|g| g.summary()).collect(),
+                    shared: shared.iter().map(|g| g.summary()).collect(),
                 },
                 Err(e) => {
                     tracing::error!("loading account {uuid}: {e}");
@@ -176,10 +187,16 @@ fn create_games(
 fn apply_db_events(mut events: ResMut<DbEvents>, mut players: Query<(&mut Client, &mut PlayerGames)>, ranks: Res<Ranks>) {
     while let Ok(event) = events.rx.try_recv() {
         match event {
-            DbEvent::Loaded { client, rank, owned } => {
+            DbEvent::Loaded {
+                client,
+                rank,
+                owned,
+                shared,
+            } => {
                 if let Ok((_, mut games)) = players.get_mut(client) {
                     games.rank = rank;
                     games.owned = owned;
+                    games.shared = shared;
                     games.loaded = true;
                 }
             }

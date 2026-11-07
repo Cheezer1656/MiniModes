@@ -2,9 +2,8 @@
 
 use std::collections::BTreeMap;
 
-pub const ENTRY: &str = "main.luau";
-pub const MAX_FILES: usize = 256;
-pub const MAX_TOTAL_BYTES: usize = 2 << 20;
+pub use mm_proto::scripts::ENTRY;
+use mm_proto::scripts::{MAX_FILES, MAX_TOTAL_BYTES, is_module, normalize};
 
 #[derive(Clone, Default, Debug)]
 pub struct Bundle {
@@ -52,26 +51,6 @@ impl Bundle {
             .find_map(|p| self.files.get_key_value(&p).map(|(k, _)| k.as_str()))
             .filter(|p| is_module(p))
     }
-}
-
-fn is_module(path: &str) -> bool {
-    path.ends_with(".luau") || path.ends_with(".lua")
-}
-
-/// Collapses `.` and `..`; `None` if the path escapes the root or is empty.
-fn normalize(path: &str) -> Option<String> {
-    let mut parts: Vec<&str> = Vec::new();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            p if p.contains('\\') => return None,
-            p => parts.push(p),
-        }
-    }
-    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 #[cfg(test)]

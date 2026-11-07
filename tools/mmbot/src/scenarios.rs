@@ -120,9 +120,10 @@ pub async fn lobby_ui(addr: SocketAddr) -> anyhow::Result<()> {
     bot.chat("hello world").await?;
     expect_chat(&mut bot, "uitest").await?;
 
-    match tokio::time::timeout(Duration::from_millis(300), bot.next_event()).await {
-        Ok(Ok(BotEvent::Disconnected(reason))) => bail!("disconnected at end: {reason}"),
-        _ => {}
+    if let Ok(Ok(BotEvent::Disconnected(reason))) =
+        tokio::time::timeout(Duration::from_millis(300), bot.next_event()).await
+    {
+        bail!("disconnected at end: {reason}");
     }
     println!("lobby-ui scenario passed");
     Ok(())
@@ -488,4 +489,304 @@ async fn select_square(bot: &mut Bot) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     anyhow::bail!("draft map never loaded")
+}
+
+const EDITOR_MAIN_V1: &str = r#"
+local util = require("lib/util")
+
+game.Players.PlayerAdded:Connect(function(player)
+    print("hello from the editor, " .. player.Name)
+    player:SendMessage(util.tag .. " editor script v1")
+    task.delay(0.1, function()
+        error("deliberate failure")
+    end)
+end)
+"#;
+
+const EDITOR_MAIN_V2: &str = r#"
+game.Players.PlayerAdded:Connect(function(player)
+    player:SendMessage("editor script v2")
+end)
+"#;
+
+const EDITOR_UTIL: &str = "return { tag = \"[util]\" }\n";
+
+/// A signed-in editor client: plain HTTP with the session cookie.
+struct Editor {
+    http: reqwest::Client,
+    base: String,
+    cookie: String,
+    game: i64,
+}
+
+impl Editor {
+    /// Exchanges a `/edit?t=` link for a session, as a browser would.
+    async fn sign_in(http: &reqwest::Client, link: &str) -> anyhow::Result<Self> {
+        let response = http.get(link).send().await?;
+        anyhow::ensure!(response.status() == 303, "redeeming the link gave {}", response.status());
+        let location = response.headers()["location"].to_str()?.to_owned();
+        let game = location
+            .strip_prefix("/editor/?game=")
+            .with_context(|| format!("unexpected redirect to {location}"))?
+            .parse()?;
+        let cookie = response.headers()["set-cookie"].to_str()?;
+        anyhow::ensure!(cookie.contains("HttpOnly"), "session cookie isn't HttpOnly: {cookie}");
+        let cookie = cookie.split(';').next().unwrap_or_default().to_owned();
+        let base = link.split("/edit?").next().unwrap_or_default().to_owned();
+        Ok(Self {
+            http: http.clone(),
+            base,
+            cookie,
+            game,
+        })
+    }
+
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let url = format!("{}/api{}", self.base, path.replace("{game}", &self.game.to_string()));
+        self.http
+            .request(method, url)
+            .header("cookie", &self.cookie)
+            .header("x-minimodes", "1")
+    }
+
+    async fn call(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> anyhow::Result<(u16, serde_json::Value)> {
+        let mut request = self.request(method, path);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        let text = response.text().await?;
+        Ok((status, serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)))
+    }
+
+    async fn expect(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        status: u16,
+    ) -> anyhow::Result<serde_json::Value> {
+        let (got, value) = self.call(method.clone(), path, body).await?;
+        anyhow::ensure!(got == status, "{method} {path}: expected {status}, got {got}: {value}");
+        Ok(value)
+    }
+
+    async fn console(&self) -> anyhow::Result<Console> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let url = format!("{}/api/games/{}/console", self.base.replacen("http", "ws", 1), self.game);
+        let mut request = url.into_client_request()?;
+        request.headers_mut().insert("cookie", self.cookie.parse()?);
+        let (socket, _) = tokio_tungstenite::connect_async(request).await?;
+        Ok(Console { socket })
+    }
+}
+
+struct Console {
+    socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+}
+
+impl Console {
+    async fn next(&mut self) -> anyhow::Result<serde_json::Value> {
+        use futures_util::StreamExt;
+        loop {
+            let msg = tokio::time::timeout(STEP_TIMEOUT, self.socket.next())
+                .await
+                .context("console went quiet")?
+                .context("console closed")??;
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                return Ok(serde_json::from_str(&text)?);
+            }
+        }
+    }
+
+    /// Waits for a line of `level` containing `needle`.
+    async fn expect(&mut self, level: &str, needle: &str) -> anyhow::Result<String> {
+        loop {
+            let msg = self.next().await.with_context(|| format!("waiting for console {level} `{needle}`"))?;
+            if msg["type"] == "line" && msg["level"] == level {
+                let text = msg["text"].as_str().unwrap_or_default();
+                if text.contains(needle) {
+                    println!("  console {level}: {}", text.lines().next().unwrap_or_default());
+                    return Ok(text.to_owned());
+                }
+            }
+        }
+    }
+}
+
+fn find_link(chat: &str) -> Option<String> {
+    let start = chat.find("http")?;
+    let link: String = chat[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || ":/.?=_-".contains(*c))
+        .collect();
+    link.contains("/edit?t=").then_some(link)
+}
+
+/// The web editor end to end: a `/script edit` link, file saves with
+/// conflicts and limits, hot reload into the running draft, the console
+/// stream, history, and collaborators. Needs the lobby (with `[web]`), a
+/// gamehost (with `editor_url`) and Postgres.
+pub async fn editor(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Result<()> {
+    use reqwest::Method;
+    use serde_json::json;
+
+    let secret = std::env::var("MINIMODES_VELOCITY_SECRET").context("MINIMODES_VELOCITY_SECRET must be set")?;
+    let db = mm_db::connect(&mm_db::url_from_env()?, 2).await?;
+    let mut gate = mock_gate::start(gate_bind, lobby).await?;
+    wait_for_network(&gate, lobby).await?;
+    let pid = std::process::id() % 100_000;
+    let (name, helper) = (format!("e{pid}"), format!("h{pid}"));
+    let game = format!("Editor {name}");
+
+    // The collaborator has to have joined once; they stay in the lobby.
+    let mut helper_bot = Bot::connect_forwarded(lobby, &helper, &secret).await?;
+    expect(&mut helper_bot, "helper spawn", |e| matches!(e, BotEvent::Teleported(_))).await?;
+    let owner_bot = create_game(lobby, &name, &game, &secret).await?;
+    let mut bot = open_draft(&mut gate, owner_bot, &name, &game, &secret).await?;
+
+    println!("/script edit gives a one-time link");
+    bot.command("script edit").await?;
+    let chat = expect_chat(&mut bot, "/edit?t=").await?;
+    let link = find_link(&chat).with_context(|| format!("no link in {chat:?}"))?;
+    let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build()?;
+    let owner = Editor::sign_in(&http, &link).await?;
+    let again = http.get(&link).send().await?;
+    anyhow::ensure!(again.status() == 400, "a used link worked again ({})", again.status());
+    let session = owner.expect(Method::GET, "/session", None, 200).await?;
+    anyhow::ensure!(
+        session["games"].as_array().is_some_and(|g| g.iter().any(|g| g["id"] == owner.game && g["role"] == "owner")),
+        "session doesn't list the game: {session}"
+    );
+
+    println!("requests without the session, the header, or from another origin are refused");
+    let anonymous = http.get(format!("{}/api/session", owner.base)).send().await?;
+    anyhow::ensure!(anonymous.status() == 401, "anonymous session gave {}", anonymous.status());
+    let no_header = http
+        .put(format!("{}/api/games/{}/files/main.luau", owner.base, owner.game))
+        .header("cookie", &owner.cookie)
+        .json(&json!({ "source": "" }))
+        .send()
+        .await?;
+    anyhow::ensure!(no_header.status() == 403, "save without X-Minimodes gave {}", no_header.status());
+    let foreign = owner
+        .request(Method::PUT, "/games/{game}/files/main.luau")
+        .header("origin", "https://evil.example")
+        .json(&json!({ "source": "" }))
+        .send()
+        .await?;
+    anyhow::ensure!(foreign.status() == 403, "cross-origin save gave {}", foreign.status());
+
+    let mut console = owner.console().await?;
+    let history = console.next().await?;
+    anyhow::ensure!(history["type"] == "history", "console opened with {history}");
+
+    println!("save files: create, conflict, bad paths, size limit");
+    owner
+        .expect(Method::PUT, "/games/{game}/files/lib/util.luau", Some(json!({ "source": EDITOR_UTIL, "base": 0 })), 200)
+        .await?;
+    let saved = owner
+        .expect(Method::PUT, "/games/{game}/files/main.luau", Some(json!({ "source": EDITOR_MAIN_V1, "base": 0 })), 200)
+        .await?;
+    anyhow::ensure!(saved["version"] == 1, "first save is version {}", saved["version"]);
+    owner
+        .expect(Method::PUT, "/games/{game}/files/main.luau", Some(json!({ "source": "-- stale", "base": 0 })), 409)
+        .await?;
+    owner
+        .expect(Method::PUT, "/games/{game}/files/bad%20name.luau", Some(json!({ "source": "" })), 400)
+        .await?;
+    owner
+        .expect(Method::PUT, "/games/{game}/files/notes.txt", Some(json!({ "source": "" })), 400)
+        .await?;
+    let huge = "-".repeat(mm_proto::scripts::MAX_TOTAL_BYTES + 1);
+    owner
+        .expect(Method::PUT, "/games/{game}/files/huge.luau", Some(json!({ "source": huge })), 413)
+        .await?;
+    let files = owner.expect(Method::GET, "/games/{game}/files", None, 200).await?;
+    let paths: Vec<_> = files.as_array().into_iter().flatten().filter_map(|f| f["path"].as_str()).collect();
+    anyhow::ensure!(paths == ["lib/util.luau", "main.luau"], "files are {paths:?}");
+
+    println!("run: the draft reloads and its output reaches the console");
+    let reload = owner.expect(Method::POST, "/games/{game}/reload", None, 200).await?;
+    anyhow::ensure!(reload["running"] == true, "reload says the draft isn't running");
+    expect_chat(&mut bot, "reloaded the scripts from the editor").await?;
+    expect_chat(&mut bot, "[util] editor script v1").await?;
+    console.expect("system", &format!("{name} reloaded the scripts")).await?;
+    console.expect("system", "scripts started").await?;
+    console.expect("info", &format!("hello from the editor, {name}")).await?;
+    let error = console.expect("error", "deliberate failure").await?;
+    anyhow::ensure!(error.contains("main.luau:"), "error doesn't name its module: {error}");
+
+    println!("history, revisions, rename and delete");
+    owner
+        .expect(Method::PUT, "/games/{game}/files/main.luau", Some(json!({ "source": EDITOR_MAIN_V2, "base": 1 })), 200)
+        .await?;
+    let revisions = owner.expect(Method::GET, "/games/{game}/history/main.luau", None, 200).await?;
+    let revisions = revisions.as_array().context("history isn't a list")?;
+    anyhow::ensure!(revisions.len() == 2, "main.luau has {} revisions", revisions.len());
+    let oldest = revisions[1]["id"].as_i64().context("revision id")?;
+    let old = owner.expect(Method::GET, &format!("/games/{{game}}/revisions/{oldest}"), None, 200).await?;
+    anyhow::ensure!(old["source"] == EDITOR_MAIN_V1, "oldest revision is {old}");
+    owner
+        .expect(Method::PUT, "/games/{game}/files/scratch.luau", Some(json!({ "source": "return 1" })), 200)
+        .await?;
+    owner
+        .expect(Method::POST, "/games/{game}/rename", Some(json!({ "from": "scratch.luau", "to": "lib/util.luau" })), 409)
+        .await?;
+    owner
+        .expect(Method::POST, "/games/{game}/rename", Some(json!({ "from": "scratch.luau", "to": "old/scratch.luau" })), 204)
+        .await?;
+    owner.expect(Method::GET, "/games/{game}/files/old/scratch.luau", None, 200).await?;
+    owner.expect(Method::DELETE, "/games/{game}/files/old/scratch.luau", None, 204).await?;
+    owner.expect(Method::GET, "/games/{game}/files/old/scratch.luau", None, 404).await?;
+
+    println!("/script reload in game also uses the saved scripts");
+    bot.command("script reload").await?;
+    expect_chat(&mut bot, "editor script v2").await?;
+
+    println!("collaborators: invite, shared access, limits, removal");
+    owner
+        .expect(Method::POST, "/games/{game}/collaborators", Some(json!({ "name": "nobody-here-xyz" })), 422)
+        .await?;
+    owner
+        .expect(Method::POST, "/games/{game}/collaborators", Some(json!({ "name": name })), 422)
+        .await?;
+    let added = owner
+        .expect(Method::POST, "/games/{game}/collaborators", Some(json!({ "name": helper.to_uppercase() })), 200)
+        .await?;
+    anyhow::ensure!(added["name"] == helper.as_str(), "added {added}");
+    // The helper's lobby menu picks the game up without rejoining.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    helper_bot.select_hotbar(1).await?;
+    helper_bot.use_item().await?;
+    let items = expect_menu(&mut helper_bot, "My Games").await?;
+    anyhow::ensure!(items.iter().any(|i| i.contains(&game)), "{game} not in the helper's My Games: {items:?}");
+
+    let (token, hash) = mm_db::editor::new_secret();
+    mm_db::editor::create_token(&db, &hash, bot_uuid(&helper), owner.game).await?;
+    let collaborator = Editor::sign_in(&http, &format!("{}/edit?t={token}", owner.base)).await?;
+    collaborator.expect(Method::GET, "/games/{game}/files/main.luau", None, 200).await?;
+    let people = collaborator.expect(Method::GET, "/games/{game}/collaborators", None, 200).await?;
+    anyhow::ensure!(people["can_manage"] == false, "collaborator can manage: {people}");
+    collaborator
+        .expect(Method::POST, "/games/{game}/collaborators", Some(json!({ "name": name })), 403)
+        .await?;
+    let helper_id = added["uuid"].as_str().context("uuid")?;
+    owner
+        .expect(Method::DELETE, &format!("/games/{{game}}/collaborators/{helper_id}"), None, 204)
+        .await?;
+    collaborator.expect(Method::GET, "/games/{game}/files/main.luau", None, 404).await?;
+
+    println!("sign out ends the session");
+    owner.expect(Method::POST, "/logout", None, 204).await?;
+    owner.expect(Method::GET, "/session", None, 401).await?;
+
+    println!("editor scenario passed");
+    Ok(())
 }

@@ -41,6 +41,9 @@ pub struct GamehostConfig {
     pub threads: ThreadConfig,
     #[serde(default)]
     pub scripts: ScriptSettings,
+    /// Public origin of the lobby's web editor, e.g. `https://edit.example.net`.
+    /// `/script edit` links point here; unset disables the command.
+    pub editor_url: Option<String>,
 }
 
 /// Per-VM script limits. Memory will come from the owner's rank later.
@@ -71,8 +74,9 @@ impl Default for ScriptSettings {
 }
 
 impl ScriptSettings {
-    pub fn script_config(&self) -> ScriptConfig {
+    pub fn script_config(&self, editor_url: Option<String>) -> ScriptConfig {
         ScriptConfig {
+            editor_url: editor_url.map(|u| u.trim_end_matches('/').to_owned()),
             limits: Limits {
                 memory: self.memory_mb << 20,
                 slice: Duration::from_secs_f64(self.slice_ms.max(0.1) / 1000.0),

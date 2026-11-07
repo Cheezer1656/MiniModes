@@ -22,6 +22,9 @@ reqwest = { version = "0.13.2", default-features = false, features = ["json"] }
 serde_json = "1.0.128"
 uuid = { version = "1.10.0", features = ["serde"] }
 zstd = "0.13.2"
+base64 = "0.22.1"
+getrandom = "0.4.3"
+axum = { version = "0.8.9", features = ["ws"] }
 # Luau with native codegen; `send` lets a VM move between task-pool threads.
 mlua = { version = "0.12.2", features = ["luau", "luau-jit", "send"] }
 sqlx = { version = "0.8.2", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid", "json"] }

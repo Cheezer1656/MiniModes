@@ -8,6 +8,10 @@
 //!   draft, and check the build survives an unload (same setup, plus Postgres).
 //! - `mmbot scripts <lobby_addr> [gate_api_bind]`: run Luau scripts in a draft:
 //!   events, chat, rules, reload, and a runaway script being stopped.
+//! - `mmbot editor <lobby_addr> [gate_api_bind]`: the web editor: login link,
+//!   file API, hot reload, console stream, history and collaborators.
+//! - `mmbot editor-link <game_id> [editor_url]`: print a sign-in link to the
+//!   web editor as the game's owner, without joining (needs Postgres).
 
 mod mock_gate;
 mod scenarios;
@@ -21,6 +25,11 @@ use mmbot::{Bot, BotEvent};
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "join".into());
+    if mode == "editor-link" {
+        let game: i64 = args.next().unwrap_or_default().parse()?;
+        let base = args.next().unwrap_or_else(|| "http://127.0.0.1:8081".into());
+        return editor_link(game, &base).await;
+    }
     let addr: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:25577".into()).parse()?;
     match mode.as_str() {
         "join" => {
@@ -41,8 +50,21 @@ async fn main() -> anyhow::Result<()> {
             let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
             scenarios::scripts(addr, gate).await
         }
-        other => anyhow::bail!("unknown mode `{other}` (expected join | lobby-ui | handoff | drafts | scripts)"),
+        "editor" => {
+            let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
+            scenarios::editor(addr, gate).await
+        }
+        other => anyhow::bail!("unknown mode `{other}` (expected join | lobby-ui | handoff | drafts | scripts | editor)"),
     }
+}
+
+async fn editor_link(game: i64, base: &str) -> anyhow::Result<()> {
+    let db = mm_db::connect(&mm_db::url_from_env()?, 1).await?;
+    let owner = mm_db::game(&db, game).await?.ok_or_else(|| anyhow::anyhow!("no game {game}"))?.owner;
+    let (secret, hash) = mm_db::editor::new_secret();
+    mm_db::editor::create_token(&db, &hash, owner, game).await?;
+    println!("{}/edit?t={secret}", base.trim_end_matches('/'));
+    Ok(())
 }
 
 async fn join(addr: SocketAddr, count: usize, hold: Duration) -> anyhow::Result<()> {
@@ -58,7 +80,7 @@ async fn join(addr: SocketAddr, count: usize, hold: Duration) -> anyhow::Result<
             .await??;
             println!("{name}: {spawned:?}");
 
-            let _ = tokio::time::timeout(hold, async {
+            tokio::time::timeout(hold, async {
                 loop {
                     match bot.next_event().await? {
                         BotEvent::Disconnected(reason) => anyhow::bail!("disconnected: {reason}"),

@@ -8,6 +8,8 @@ data_dir = "data"
 autosave_secs = 10
 max_edit_volume = 1000000
 edit_blocks_per_tick = 20000
+# Where `/script edit` links point (the lobby's web editor).
+editor_url = "http://127.0.0.1:8081"
 
 [threads]
 tokio_workers = 1

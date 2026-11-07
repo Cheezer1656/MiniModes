@@ -90,6 +90,8 @@ pub struct PlayerGames {
     pub recent: VecDeque<GameId>,
     /// Games this player created, newest first.
     pub owned: Vec<GameSummary>,
+    /// Other players' games this player may edit.
+    pub shared: Vec<GameSummary>,
     pub rank: Option<String>,
     /// Set once `owned` and `rank` have loaded.
     pub loaded: bool,
@@ -113,6 +115,11 @@ impl PlayerGames {
 
     pub fn owned(&self, id: GameId) -> Option<&GameSummary> {
         self.owned.iter().find(|g| g.id == id)
+    }
+
+    /// A game whose draft this player may edit.
+    pub fn editable(&self, id: GameId) -> Option<&GameSummary> {
+        self.owned(id).or_else(|| self.shared.iter().find(|g| g.id == id))
     }
 
     pub fn played(&mut self, id: GameId) {

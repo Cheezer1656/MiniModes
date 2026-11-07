@@ -1,5 +1,6 @@
 --!strict
--- Type definitions for Minimodes game scripts (API v1, phase 5).
+-- Type definitions for Minimodes game scripts (API v1). The web editor reads
+-- this file for completions and hovers.
 --
 -- Scripts start at `main.luau`; other modules load with `require("path")`,
 -- relative to the caller when the path starts with `./` or `../`, else from

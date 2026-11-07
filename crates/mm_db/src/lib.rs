@@ -1,6 +1,8 @@
 //! Postgres access shared by the lobby and shards. Queries are checked at
 //! runtime (no `DATABASE_URL` needed to build); migrations are embedded.
 
+pub mod editor;
+
 use std::time::Duration;
 
 use mm_proto::{GameId, GameKind, GameSummary};
@@ -8,6 +10,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
+pub use sqlx::Error;
 pub use sqlx::PgPool as Pool;
 
 /// Environment variable holding the Postgres URL.
@@ -90,7 +93,7 @@ impl GameRow {
     }
 }
 
-const GAME_COLUMNS: &str = "g.id, g.owner, p.username AS owner_name, g.name, g.description, g.icon, g.kind, \
+pub(crate) const GAME_COLUMNS: &str = "g.id, g.owner, p.username AS owner_name, g.name, g.description, g.icon, g.kind, \
      g.max_players, g.map_size, g.draft_map_hash, extract(epoch FROM g.created_at)::bigint AS created_unix";
 
 /// Records a login and returns the player's rank, if one was granted.
@@ -185,10 +188,12 @@ pub async fn draft_files(pool: &PgPool, game: i64) -> sqlx::Result<Vec<(String, 
         .await
 }
 
+/// Writes a file without the editor's checks or history (tests and tools).
 pub async fn put_draft_file(pool: &PgPool, game: i64, path: &str, source: &str, by: Option<Uuid>) -> sqlx::Result<()> {
     sqlx::query(
         "INSERT INTO draft_files (game, path, source, updated_by) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (game, path) DO UPDATE SET source = $3, updated_by = $4, updated_at = now()",
+         ON CONFLICT (game, path) DO UPDATE
+         SET source = $3, updated_by = $4, updated_at = now(), version = draft_files.version + 1",
     )
     .bind(game)
     .bind(path)

@@ -5,6 +5,11 @@ coordinator_bind = "127.0.0.1:25700"
 gate_api = "http://127.0.0.1:8090"
 keep_loaded_radius = 4
 
+# The web script editor. In production Caddy terminates TLS in front of it.
+[web]
+bind = "127.0.0.1:8081"
+secure_cookies = false
+
 [spawn]
 x = 0.5
 y = 65.0

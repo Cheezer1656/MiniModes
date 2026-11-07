@@ -43,6 +43,8 @@ pub enum ScriptSet {
 
 #[derive(Resource, Clone)]
 pub struct ScriptConfig {
+    /// Origin of the web editor `/script edit` links to.
+    pub editor_url: Option<String>,
     pub limits: Limits,
     /// Script block writes applied per instance per tick; the rest wait.
     pub blocks_per_tick: usize,
@@ -105,12 +107,27 @@ impl ScriptHost {
     }
 }
 
+/// The lobby's editor saved a draft's scripts.
+#[derive(Message, Clone, Debug)]
+pub struct ReloadDraft {
+    pub game: GameId,
+    pub by: String,
+}
+
+/// Script output forwarded to the editor console per instance per second;
+/// the rest is counted and reported as dropped.
+const CONSOLE_LINES_PER_SECOND: u32 = 100;
+
 enum LoadEvent {
     Loaded {
         layer: Entity,
         game: GameId,
         generation: u64,
         result: Result<Option<Box<Vm>>, String>,
+    },
+    EditorLink {
+        client: Entity,
+        result: Result<String, &'static str>,
     },
 }
 
@@ -124,17 +141,50 @@ struct Loads {
 #[derive(Component)]
 struct ScriptGeneration(u64);
 
+/// Rate limit on lines sent to the editor console.
+#[derive(Component, Default)]
+struct ConsoleBudget {
+    window: u64,
+    sent: u32,
+    dropped: u32,
+}
+
+impl ConsoleBudget {
+    fn take(&mut self) -> bool {
+        self.sent += 1;
+        let ok = self.sent <= CONSOLE_LINES_PER_SECOND;
+        if !ok {
+            self.dropped += 1;
+        }
+        ok
+    }
+
+    /// Starts a new window each second; returns how many lines the last one dropped.
+    fn roll(&mut self, tick: u64) -> u32 {
+        if tick < self.window + TICKS_PER_SECOND {
+            return 0;
+        }
+        self.window = tick;
+        self.sent = 0;
+        std::mem::take(&mut self.dropped)
+    }
+}
+
+const TICKS_PER_SECOND: u64 = 20;
+
 pub struct ScriptPlugin;
 
 impl Plugin for ScriptPlugin {
     fn build(&self, app: &mut App) {
         let (tx, rx) = mpsc::unbounded_channel();
         app.insert_resource(Loads { tx, rx })
+            .add_message::<ReloadDraft>()
             .add_systems(
                 Update,
                 (
                     load_new_drafts,
                     script_commands,
+                    editor_reloads,
                     apply_loads,
                     poll_steps,
                     apply_pending_blocks,
@@ -190,46 +240,124 @@ fn load_new_drafts(
     loader: Loader,
 ) {
     for (layer, instance, world) in &layers {
-        commands.entity(layer).insert((ScriptGeneration(1), GameRules::default()));
+        commands
+            .entity(layer)
+            .insert((ScriptGeneration(1), GameRules::default(), ConsoleBudget::default()));
         loader.start(layer, instance.spec.game, 1, world.mirror.clone());
     }
 }
 
-/// `/script reload|stop` inside a draft.
+/// Restarts (or just stops) a draft's scripts, dropping whatever rules
+/// they set.
+fn restart(
+    commands: &mut Commands,
+    loader: &Loader,
+    layer: Entity,
+    (instance, world, generation, rules): (&Instance, &DraftWorld, &mut ScriptGeneration, &mut GameRules),
+    start: bool,
+) {
+    generation.0 += 1;
+    rules.0 = RuleSet::default();
+    commands.entity(layer).remove::<ScriptHost>();
+    if start {
+        loader.start(layer, instance.spec.game, generation.0, world.mirror.clone());
+    }
+}
+
+type DraftParts<'a> = (
+    &'a Instance,
+    &'a DraftWorld,
+    &'a mut ScriptGeneration,
+    &'a mut GameRules,
+);
+
+/// `/script reload|stop|edit` inside a draft.
 fn script_commands(
     mut commands: Commands,
     mut messages: MessageReader<CommandExecutionMessage>,
-    mut players: Query<(&mut Client, &InInstance)>,
-    mut layers: Query<(&Instance, &DraftWorld, &mut ScriptGeneration, &mut GameRules)>,
+    mut players: Query<(&mut Client, &InInstance, &UniqueId, &Username)>,
+    mut layers: Query<DraftParts>,
     loader: Loader,
+    link: Res<LobbyLink>,
 ) {
     for cmd in messages.read() {
         let mut args = cmd.command.split_whitespace();
         if args.next() != Some("script") {
             continue;
         }
-        let Ok((mut client, in_instance)) = players.get_mut(cmd.executor) else {
+        let Ok((mut client, in_instance, uuid, name)) = players.get_mut(cmd.executor) else {
             continue;
         };
-        let Ok((instance, world, mut generation, mut rules)) = layers.get_mut(in_instance.0) else {
+        let layer = in_instance.0;
+        let Ok((instance, world, mut generation, mut rules)) = layers.get_mut(layer) else {
             client.send_chat_message("§cScripts can only be controlled while editing a draft.");
             continue;
         };
+        let game = instance.spec.game;
+        let parts = (instance, world, &mut *generation, &mut *rules);
         match args.next() {
             Some("reload") => {
-                generation.0 += 1;
-                rules.0 = RuleSet::default();
-                commands.entity(in_instance.0).remove::<ScriptHost>();
-                loader.start(in_instance.0, instance.spec.game, generation.0, world.mirror.clone());
+                restart(&mut commands, &loader, layer, parts, true);
+                report(&link, game, DiagnosticLevel::System, &format!("{} reloaded the scripts", name.0));
                 client.send_chat_message("§7Reloading scripts...");
             }
             Some("stop") => {
-                generation.0 += 1;
-                rules.0 = RuleSet::default();
-                commands.entity(in_instance.0).remove::<ScriptHost>();
+                restart(&mut commands, &loader, layer, parts, false);
+                report(&link, game, DiagnosticLevel::System, &format!("{} stopped the scripts", name.0));
                 client.send_chat_message("§7Scripts stopped. §f/script reload§7 starts them again.");
             }
-            _ => client.send_chat_message("§7Usage: §f/script reload§7 or §f/script stop"),
+            Some("edit") => {
+                let Some(base) = loader.config.editor_url.clone() else {
+                    client.send_chat_message("§cThe web editor isn't set up on this server.");
+                    continue;
+                };
+                let (db, tx, player, client_entity) = (loader.storage.db.clone(), loader.loads.tx.clone(), uuid.0, cmd.executor);
+                loader.tokio.0.spawn(async move {
+                    let result = async {
+                        if mm_db::editor::role(&db, game.0, player).await?.is_none() {
+                            return Ok(Err("§cYou can't edit this game's scripts."));
+                        }
+                        let (secret, hash) = mm_db::editor::new_secret();
+                        mm_db::editor::create_token(&db, &hash, player, game.0).await?;
+                        Ok::<_, mm_db::Error>(Ok(format!("{base}/edit?t={secret}")))
+                    }
+                    .await;
+                    let result = result.unwrap_or_else(|e| {
+                        tracing::error!("creating an editor link for {player}: {e}");
+                        Err("§cCouldn't create an editor link right now. Try again later.")
+                    });
+                    let _ = tx.send(LoadEvent::EditorLink {
+                        client: client_entity,
+                        result,
+                    });
+                });
+            }
+            _ => client.send_chat_message("§7Usage: §f/script edit§7, §f/script reload§7 or §f/script stop"),
+        }
+    }
+}
+
+/// Saves from the web editor restart the draft's scripts.
+fn editor_reloads(
+    mut commands: Commands,
+    mut reloads: MessageReader<ReloadDraft>,
+    mut layers: Query<(Entity, DraftParts)>,
+    mut players: Query<(&InInstance, &mut Client)>,
+    loader: Loader,
+    link: Res<LobbyLink>,
+) {
+    for reload in reloads.read() {
+        for (layer, (instance, world, mut generation, mut rules)) in &mut layers {
+            if instance.spec.game != reload.game || !instance.is_draft() {
+                continue;
+            }
+            restart(&mut commands, &loader, layer, (instance, world, &mut *generation, &mut *rules), true);
+            report(&link, reload.game, DiagnosticLevel::System, &format!("{} reloaded the scripts", reload.by));
+            for (in_instance, mut client) in &mut players {
+                if in_instance.0 == layer {
+                    client.send_chat_message(format!("§7{} reloaded the scripts from the editor.", reload.by));
+                }
+            }
         }
     }
 }
@@ -239,15 +367,36 @@ fn apply_loads(
     mut loads: ResMut<Loads>,
     layers: Query<&ScriptGeneration, Without<Despawned>>,
     mut players: Query<(&InInstance, &mut Client)>,
+    mut clients: Query<&mut Client, Without<InInstance>>,
     link: Res<LobbyLink>,
 ) {
-    while let Ok(LoadEvent::Loaded {
-        layer,
-        game,
-        generation,
-        result,
-    }) = loads.rx.try_recv()
-    {
+    while let Ok(event) = loads.rx.try_recv() {
+        let (layer, game, generation, result) = match event {
+            LoadEvent::Loaded {
+                layer,
+                game,
+                generation,
+                result,
+            } => (layer, game, generation, result),
+            LoadEvent::EditorLink { client, result } => {
+                let text = match result {
+                    Ok(url) => Text::text("§7Open the script editor: ")
+                        + url
+                            .clone()
+                            .color(Color::AQUA)
+                            .underlined()
+                            .on_click_open_url(url)
+                            .on_hover_show_text("§7Works once, for 10 minutes"),
+                    Err(msg) => Text::text(msg),
+                };
+                if let Ok((_, mut c)) = players.get_mut(client) {
+                    c.send_chat_message(text);
+                } else if let Ok(mut c) = clients.get_mut(client) {
+                    c.send_chat_message(text);
+                }
+                continue;
+            }
+        };
         let Ok(current) = layers.get(layer) else {
             continue;
         };
@@ -257,9 +406,13 @@ fn apply_loads(
         let notice = match result {
             Ok(Some(vm)) => {
                 commands.entity(layer).insert(ScriptHost::new(vm));
+                report(&link, game, DiagnosticLevel::System, "scripts started");
                 "§aScripts started.".to_owned()
             }
-            Ok(None) => continue,
+            Ok(None) => {
+                report(&link, game, DiagnosticLevel::System, &format!("no scripts yet: create `{}`", mm_script::ENTRY));
+                continue;
+            }
             Err(e) => {
                 report(&link, game, DiagnosticLevel::Error, &e);
                 format!("§cScripts failed to start: §7{e}")
@@ -294,12 +447,31 @@ type PlayerParts<'a> = (
 #[allow(clippy::too_many_arguments)]
 fn poll_steps(
     mut commands: Commands,
-    mut layers: Query<(Entity, &Instance, &mut ScriptHost, &mut GameRules, &mut ChunkLayer, &mut DraftWorld)>,
+    mut layers: Query<(
+        Entity,
+        &Instance,
+        &mut ScriptHost,
+        &mut GameRules,
+        &mut ChunkLayer,
+        &mut DraftWorld,
+        &mut ConsoleBudget,
+    )>,
     mut players: Query<PlayerParts, With<InInstance>>,
     mut to_lobby: MessageWriter<SendToLobby>,
     link: Res<LobbyLink>,
+    server: Res<Server>,
 ) {
-    for (layer, instance, mut host, mut rules, mut chunks, mut world) in &mut layers {
+    let tick = server.current_tick() as u64;
+    for (layer, instance, mut host, mut rules, mut chunks, mut world, mut budget) in &mut layers {
+        let dropped = budget.roll(tick);
+        if dropped > 0 {
+            report(
+                &link,
+                instance.spec.game,
+                DiagnosticLevel::System,
+                &format!("{dropped} lines of output dropped (over {CONSOLE_LINES_PER_SECOND} per second)"),
+            );
+        }
         let Slot::Running(task) = &mut host.slot else {
             continue;
         };
@@ -321,14 +493,12 @@ fn poll_steps(
         let mut chat = Vec::new();
         for d in out.diagnostics {
             let color = match d.level {
-                DiagnosticLevel::Info => "§7",
+                DiagnosticLevel::Info | DiagnosticLevel::System => "§7",
                 DiagnosticLevel::Warn => "§e",
                 DiagnosticLevel::Error => "§c",
             };
             chat.push(format!("§8[script] {color}{}", d.message));
-            // Prints stay in the draft's chat until the editor console
-            // (phase 6) streams them.
-            if d.level != DiagnosticLevel::Info {
+            if budget.take() {
                 report(&link, game, d.level, &d.message);
             }
         }
@@ -337,7 +507,7 @@ fn poll_steps(
         }
         if let Some(reason) = out.fatal {
             tracing::warn!("stopping scripts of game {}: {reason}", game.0);
-            report(&link, game, DiagnosticLevel::Error, &format!("scripts stopped: {reason}"));
+            report(&link, game, DiagnosticLevel::System, &format!("scripts stopped: {reason}"));
             chat.push(format!("§cScripts stopped: §7{reason}"));
             rules.0 = RuleSet::default();
             commands.entity(layer).remove::<ScriptHost>();

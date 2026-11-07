@@ -6,16 +6,20 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
 chunkedge.workspace = true
+futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 mm_core.workspace = true
 mm_db.workspace = true
 mm_gate.workspace = true
 mm_proto.workspace = true
 mm_ui.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

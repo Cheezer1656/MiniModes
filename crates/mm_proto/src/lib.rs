@@ -2,6 +2,7 @@
 //! they speak over loopback TCP (see [`ipc`]).
 
 pub mod ipc;
+pub mod scripts;
 
 use serde::{Deserialize, Serialize};
 

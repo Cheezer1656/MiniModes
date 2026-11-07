@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minimodes Script Editor</title>
+<link rel="stylesheet" href="editor.css">
+</head>
+<body>
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <button id="toggle-sidebar" class="icon-btn only-narrow" title="Files" aria-label="Show files">☰</button>
+    <span class="brand">minimodes</span>
+    <select id="game-select" class="game-select" aria-label="Game"></select>
+    <span id="status" class="status" role="status"></span>
+    <span class="spacer"></span>
+    <label class="check" title="Restart the draft's scripts after every save">
+      <input type="checkbox" id="auto-reload" checked> Reload on save
+    </label>
+    <button id="save" class="btn" title="Save (Ctrl+S)">Save</button>
+    <button id="run" class="btn primary" title="Save all and restart scripts (Ctrl+Enter)">▶ Run</button>
+    <button id="history" class="btn ghost" title="History of this file">History</button>
+    <button id="people" class="btn ghost" title="Collaborators">People</button>
+    <span id="who" class="who"></span>
+    <button id="logout" class="btn ghost" title="Sign out">Sign out</button>
+  </header>
+
+  <aside id="sidebar" class="sidebar">
+    <div class="pane-head">
+      <span>Files</span>
+      <span id="usage" class="muted small"></span>
+      <button id="new-file" class="icon-btn" title="New file" aria-label="New file">＋</button>
+    </div>
+    <nav id="tree" class="file-tree" aria-label="Script files"></nav>
+  </aside>
+
+  <main class="workspace">
+    <div id="tabs" class="tabs" role="tablist"></div>
+    <div id="banner" class="banner" hidden></div>
+    <div id="editor" class="editor"></div>
+    <div id="empty" class="empty" hidden>
+      <h2 id="empty-title">No scripts yet</h2>
+      <p id="empty-text"></p>
+      <button id="create-main" class="btn primary">Create main.luau</button>
+    </div>
+  </main>
+
+  <section id="console" class="console" aria-label="Console">
+    <div class="pane-head">
+      <span>Console</span>
+      <span id="console-state" class="dot" title="Disconnected"></span>
+      <span class="spacer"></span>
+      <label class="check small"><input type="checkbox" data-level="info" checked> Output</label>
+      <label class="check small"><input type="checkbox" data-level="warn" checked> Warnings</label>
+      <label class="check small"><input type="checkbox" data-level="error" checked> Errors</label>
+      <label class="check small"><input type="checkbox" data-level="system" checked> System</label>
+      <button id="console-clear" class="btn ghost small">Clear</button>
+    </div>
+    <div id="console-lines" class="console-lines" role="log" aria-live="polite"></div>
+  </section>
+</div>
+
+<div id="signin" class="signin" hidden>
+  <div class="card">
+    <h1>Minimodes Script Editor</h1>
+    <p id="signin-msg">You're not signed in.</p>
+    <p>Join your game's draft in Minecraft and run <code>/script edit</code>. Click the link it gives you.</p>
+  </div>
+</div>
+
+<dialog id="dialog" class="dialog">
+  <form method="dialog" id="dialog-form">
+    <h3 id="dialog-title"></h3>
+    <div id="dialog-body"></div>
+    <div id="dialog-buttons" class="dialog-buttons"></div>
+  </form>
+</dialog>
+
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+<script src="editor.js"></script>
+</body>
+</html>

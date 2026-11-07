@@ -101,17 +101,25 @@ fn browser(catalog: &GameCatalog, player: &PlayerGames, tab: BrowserTab, page: u
 
 fn my_games(player: &PlayerGames, page: usize) -> Menu<LobbyAction> {
     let mut menu = Menu::new("My Games", ROWS);
-    menu.item(4, icon(ItemKind::WritableBook, "§bMy Games", [Text::text("§7Games you created")]));
+    menu.item(
+        4,
+        icon(ItemKind::WritableBook, "§bMy Games", [Text::text("§7Games you created or help build")]),
+    );
     if !player.loaded {
         menu.item(EMPTY_SLOT, icon(ItemKind::Clock, "§7Loading your games...", []));
-    } else if player.owned.is_empty() {
+    } else if player.owned.is_empty() && player.shared.is_empty() {
         menu.item(EMPTY_SLOT, icon(ItemKind::Barrier, "§cYou haven't created any games", []));
     }
-    let games = &player.owned;
+    let games: Vec<_> = player
+        .owned
+        .iter()
+        .map(|g| (g, false))
+        .chain(player.shared.iter().map(|g| (g, true)))
+        .collect();
     let pages = games.len().div_ceil(PER_PAGE).max(1);
     let page = page.min(pages - 1);
-    for (slot, game) in GRID.iter().zip(games.iter().skip(page * PER_PAGE)) {
-        menu.button(*slot, draft_icon(game), LobbyAction::EditDraft(game.id));
+    for (slot, (game, shared)) in GRID.iter().zip(games.iter().skip(page * PER_PAGE)) {
+        menu.button(*slot, draft_icon(game, *shared), LobbyAction::EditDraft(game.id));
     }
     if page > 0 {
         menu.button(PREV, icon(ItemKind::Arrow, "§7← Previous page", []), LobbyAction::MyGames { page: page - 1 });
@@ -131,17 +139,18 @@ fn my_games(player: &PlayerGames, page: usize) -> Menu<LobbyAction> {
     finish(menu)
 }
 
-fn draft_icon(game: &GameSummary) -> ItemStack {
+fn draft_icon(game: &GameSummary, shared: bool) -> ItemStack {
     let kind = ItemKind::from_str(&game.icon).unwrap_or(ItemKind::Paper);
-    icon(
-        kind,
-        format!("§a{}", game.name),
-        [
-            Text::text(format!("§7{}", kind_label(game.kind))),
-            Text::default(),
-            Text::text("§eClick to build"),
-        ],
-    )
+    let mut lore = vec![Text::text(format!("§7{}", kind_label(game.kind)))];
+    if shared {
+        lore.push(Text::text(format!("§7Owned by §f{}", game.creator)));
+    }
+    lore.extend([
+        Text::default(),
+        Text::text("§eClick to build"),
+        Text::text("§8/script edit inside opens the editor"),
+    ]);
+    icon(kind, format!("§a{}", game.name), lore)
 }
 
 fn kind_label(kind: GameKind) -> &'static str {

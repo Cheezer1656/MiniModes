@@ -6,6 +6,9 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
 mm_proto.workspace = true
 sqlx.workspace = true
 uuid.workspace = true

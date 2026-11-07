@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
             max_volume: config.max_edit_volume,
             blocks_per_tick: config.edit_blocks_per_tick,
         })
-        .insert_resource(config.scripts.script_config())
+        .insert_resource(config.scripts.script_config(config.editor_url.clone()))
         .configure_sets(
             Update,
             (InstanceSet, WorldSet, ScriptSet::Apply, BuildSet, ScriptSet::Spawn).chain(),

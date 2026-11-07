@@ -57,9 +57,12 @@ pub struct InstanceStatus {
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DiagnosticLevel {
+    /// Script output (`print`).
     Info,
     Warn,
     Error,
+    /// From the platform about the scripts: started, stopped, reloaded.
+    System,
 }
 
 /// Shard → lobby.
@@ -107,6 +110,12 @@ pub enum LobbyMsg {
     StopInstance { instance: InstanceId },
     /// Stop every instance of a game (moderation).
     KillGame { game: GameId },
+    /// The draft's scripts changed: restart them in its running instance.
+    ReloadDraft {
+        game: GameId,
+        /// Who asked, for the console.
+        by: String,
+    },
 }
 
 pub fn encode_frame<T: Serialize>(msg: &T) -> io::Result<Vec<u8>> {
@@ -228,6 +237,13 @@ mod tests {
         let huge = ((MAX_FRAME + 1) as u32).to_be_bytes();
         let err = read_frame::<_, ShardMsg>(&mut huge.as_slice()).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let reload = LobbyMsg::ReloadDraft {
+            game: GameId(3),
+            by: "Steve".into(),
+        };
+        let got: LobbyMsg = read_frame(&mut encode_frame(&reload).unwrap().as_slice()).await.unwrap().unwrap();
+        assert_eq!(got, reload);
 
         let mut frame = encode_frame(&LobbyMsg::KillGame { game: GameId(3) }).unwrap();
         frame.pop();

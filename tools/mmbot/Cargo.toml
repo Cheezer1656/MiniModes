@@ -8,11 +8,15 @@ publish.workspace = true
 anyhow.workspace = true
 chunkedge.workspace = true
 chunkedge_binary.workspace = true
+futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 hmac = "0.13.0"
 mm_db.workspace = true
+mm_proto.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.0"
 tokio.workspace = true
+tokio-tungstenite = "0.26.2"
 
 [lints]
 workspace = true

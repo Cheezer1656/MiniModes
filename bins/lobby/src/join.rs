@@ -13,7 +13,7 @@ pub struct JoinRequest {
     pub client: Entity,
     pub game: GameId,
     /// Build in the draft instead of playing the published game. Only the
-    /// owner may.
+    /// owner and collaborators may.
     pub draft: bool,
 }
 
@@ -36,7 +36,7 @@ fn handle_joins(
             continue;
         };
         let (game, version) = if request.draft {
-            (games.owned(request.game), GameVersion::Draft)
+            (games.editable(request.game), GameVersion::Draft)
         } else {
             (catalog.get(request.game), GameVersion::Published(1))
         };

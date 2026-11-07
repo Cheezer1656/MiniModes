@@ -256,6 +256,26 @@ impl Coordinator {
         Ok(())
     }
 
+    /// Restarts the scripts of the game's running draft, if any. Returns
+    /// whether one was running.
+    pub fn reload_draft(&self, game: GameId, by: &str) -> bool {
+        let mut running = false;
+        for shard in self.directory.shards.values() {
+            if shard
+                .instances
+                .values()
+                .any(|i| i.status.spec.game == game && i.status.spec.version == GameVersion::Draft)
+            {
+                running = true;
+                let _ = shard.tx.send(LobbyMsg::ReloadDraft {
+                    game,
+                    by: by.to_owned(),
+                });
+            }
+        }
+        running
+    }
+
     fn release(&mut self, ticket: Ticket) -> Option<PendingJoin> {
         let pending = self.pending.remove(&ticket)?;
         if !pending.connecting
@@ -295,6 +315,7 @@ fn pump_network(
     mut catalog: ResMut<GameCatalog>,
     mut clients: LobbyClients,
     tokio: Res<Tokio>,
+    console: Res<crate::web::Console>,
 ) {
     let coordinator = &mut *coordinator;
     let mut changed = false;
@@ -388,11 +409,15 @@ fn pump_network(
                             s.instances.remove(&instance);
                         }
                     }
-                    ShardMsg::Diagnostic { game, level, message } => match level {
-                        DiagnosticLevel::Info => tracing::info!("game {}: {message}", game.0),
-                        DiagnosticLevel::Warn => tracing::warn!("game {}: {message}", game.0),
-                        DiagnosticLevel::Error => tracing::error!("game {}: {message}", game.0),
-                    },
+                    ShardMsg::Diagnostic { game, level, message } => {
+                        match level {
+                            DiagnosticLevel::Info => {}
+                            DiagnosticLevel::System => tracing::info!("game {}: {message}", game.0),
+                            DiagnosticLevel::Warn => tracing::warn!("game {}: {message}", game.0),
+                            DiagnosticLevel::Error => tracing::error!("game {}: {message}", game.0),
+                        }
+                        console.0.push(game, crate::web::Line::new(level, &message));
+                    }
                 }
             }
         }

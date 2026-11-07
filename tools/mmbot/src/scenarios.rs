@@ -99,7 +99,7 @@ pub async fn lobby_ui(addr: SocketAddr) -> anyhow::Result<()> {
     bot.use_item().await?;
     expect_menu(&mut bot, "My Games").await?;
     bot.click(50, 0).await?;
-    expect_chat(&mut bot, "isn't available yet").await?;
+    expect_menu(&mut bot, "Create a Game").await?;
 
     if npcs.is_empty() {
         let event = expect(&mut bot, "an NPC", |e| {
@@ -312,20 +312,26 @@ async fn create_kind(lobby: SocketAddr, name: &str, game: &str, secret: &str, ki
     println!("{name}: create \"{game}\"");
     let mut bot = Bot::connect_forwarded(lobby, name, secret).await?;
     expect(&mut bot, "lobby spawn", |e| matches!(e, BotEvent::Teleported(_))).await?;
+    create_in_lobby(&mut bot, game, kind).await?;
+    Ok(bot)
+}
+
+/// My Games → Create a Game → `kind` → icon → name, for a bot already in the lobby.
+async fn create_in_lobby(bot: &mut Bot, game: &str, kind: i16) -> anyhow::Result<()> {
     // The account loads asynchronously after join.
     tokio::time::sleep(Duration::from_millis(500)).await;
     bot.select_hotbar(1).await?;
     bot.use_item().await?;
-    expect_menu(&mut bot, "My Games").await?;
+    expect_menu(bot, "My Games").await?;
     bot.click(50, 0).await?;
-    expect_menu(&mut bot, "Create a Game").await?;
+    expect_menu(bot, "Create a Game").await?;
     bot.click(kind, 0).await?;
-    expect_menu(&mut bot, "Pick an Icon").await?;
+    expect_menu(bot, "Pick an Icon").await?;
     bot.click(10, 0).await?;
-    expect_chat(&mut bot, "Type a name").await?;
+    expect_chat(bot, "Type a name").await?;
     bot.chat(game).await?;
-    expect_chat(&mut bot, "Created").await?;
-    Ok(bot)
+    expect_chat(bot, "Created").await?;
+    Ok(())
 }
 
 const SCRIPT_MAIN: &str = r#"
@@ -1384,5 +1390,71 @@ pub async fn moderation(lobby: SocketAddr, gate_bind: SocketAddr) -> anyhow::Res
     .await?;
 
     println!("moderation scenario passed");
+    Ok(())
+}
+
+/// Everything through the real Gate (offline mode): login, lobby, a publish,
+/// then the lobby → shard → lobby switches Gate performs on the same
+/// connections. `gate` is Gate's player port; the lobby and a gamehost must be
+/// running against Gate's API and Postgres. No mock Gate and no direct
+/// backend logins.
+pub async fn gate(gate: SocketAddr) -> anyhow::Result<()> {
+    let pid = std::process::id() % 100_000;
+    let game = format!("Gated {pid}");
+
+    println!("alice: log in through Gate");
+    // Gate rate-limits logins per address, so the first attempts after a burst may be dropped.
+    let mut alice = None;
+    for attempt in 1.. {
+        let mut bot = Bot::connect(gate, &format!("ga{pid}")).await?;
+        match tokio::time::timeout(Duration::from_secs(10), bot.wait_for(|e| matches!(e, BotEvent::Teleported(_)))).await {
+            Ok(Ok(_)) => {
+                alice = Some(bot);
+                break;
+            }
+            Ok(Err(e)) if attempt < 10 => println!("  not yet ({e:#})"),
+            Err(_) if attempt < 10 => println!("  not yet (timed out)"),
+            Ok(Err(e)) => return Err(e),
+            Err(_) => bail!("never reached the lobby through Gate"),
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    let mut alice = alice.context("no bot")?;
+    println!("  in the lobby");
+
+    create_in_lobby(&mut alice, &game, PERSISTENT).await?;
+    publish_game(&mut alice, &game, None).await?;
+
+    println!("alice: browser → {game} (Gate moves her to a shard)");
+    let mut sent = false;
+    for attempt in 1..=40 {
+        alice.select_hotbar(0).await?;
+        alice.use_item().await?;
+        let items = expect_menu(&mut alice, "Game Browser").await?;
+        let idx = items.iter().position(|i| i.contains(&game)).with_context(|| format!("{game} not listed: {items:?}"))?;
+        alice.click(idx as i16, 0).await?;
+        let reply = expect(&mut alice, "join reply", |e| {
+            matches!(e, BotEvent::Chat(m) if m.contains("Sending you to") || m.contains("No game servers"))
+        })
+        .await?;
+        if matches!(&reply, BotEvent::Chat(m) if m.contains("Sending you to")) {
+            sent = true;
+            break;
+        }
+        println!("  no shard yet ({attempt})");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    anyhow::ensure!(sent, "no shard ever became available");
+    expect(&mut alice, "Gate switching backends", |e| matches!(e, BotEvent::Reconfiguring)).await?;
+    expect_chat(&mut alice, "Joined game").await?;
+    println!("  on the shard");
+
+    println!("alice: /lobby (Gate moves her back)");
+    alice.command("lobby").await?;
+    expect(&mut alice, "Gate switching backends", |e| matches!(e, BotEvent::Reconfiguring)).await?;
+    expect(&mut alice, "lobby spawn", |e| matches!(e, BotEvent::Teleported(_))).await?;
+    println!("  back in the lobby");
+
+    println!("gate scenario passed");
     Ok(())
 }

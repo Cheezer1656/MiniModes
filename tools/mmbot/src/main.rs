@@ -2,6 +2,8 @@
 //!
 //! - `mmbot join <addr> [count] [hold_secs]`: join `count` bots and hold them.
 //! - `mmbot lobby-ui <addr>`: drive the lobby hotbar, menus, search, NPCs and chat.
+//! - `mmbot gate <gate_addr>`: log in through the real Gate, create and publish
+//!   a game, then switch lobby → shard → lobby (the container stack's check).
 //! - `mmbot handoff <lobby_addr> [gate_api_bind]`: lobby → shard → lobby against
 //!   the real lobby and gamehost, with a mock Gate API (see `mock_gate`).
 //! - `mmbot drafts <lobby_addr> [gate_api_bind]`: create a game, build in its
@@ -44,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
             join(addr, count, hold).await
         }
         "lobby-ui" => scenarios::lobby_ui(addr).await,
+        "gate" => scenarios::gate(addr).await,
         "handoff" => {
             let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
             scenarios::handoff(addr, gate).await
@@ -72,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
             let gate: SocketAddr = args.next().unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
             scenarios::editor(addr, gate).await
         }
-        other => anyhow::bail!("unknown mode `{other}` (expected join | lobby-ui | handoff | drafts | scripts | games | data | moderation | editor)"),
+        other => anyhow::bail!("unknown mode `{other}` (expected join | lobby-ui | gate | handoff | drafts | scripts | games | data | moderation | editor)"),
     }
 }
 

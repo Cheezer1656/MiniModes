@@ -24,7 +24,11 @@ pg_restore --clean --if-exists --no-owner --dbname="$DB" "$work/db.dump"
 
 echo "restoring maps (current ones, plus any deleted since $DATE)"
 rclone copy "$REMOTE/worlds" "$DATA/worlds"
-rclone copy "$REMOTE/worlds-deleted" "$work/deleted"
+mkdir -p "$work/deleted"
+# worlds-deleted only exists once a map has been deleted since the first backup.
+if rclone lsf --max-depth 1 "$REMOTE/worlds-deleted" 2>/dev/null | grep -q .; then
+	rclone copy "$REMOTE/worlds-deleted" "$work/deleted"
+fi
 find "$work/deleted" -name '*.mmw' -exec cp -n {} "$DATA/worlds/" \;
 chown -R minimodes:minimodes "$DATA/worlds"
 

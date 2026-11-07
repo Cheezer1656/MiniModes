@@ -1,0 +1,55 @@
+# Container stack. Addresses are the fixed IPs from compose.yml (the servers
+# take socket addresses, not hostnames). No `world`, so a flat platform.
+bind = "10.77.0.10:25600"
+max_players = 100
+coordinator_bind = "10.77.0.10:25700"
+gate_api = "http://gate:8080"
+keep_loaded_radius = 4
+metrics_bind = "10.77.0.10:9101"
+
+[web]
+bind = "10.77.0.10:8081"
+secure_cookies = false
+
+[moderation]
+hold_at_reports = 2
+text_log_days = 30
+
+[ranks.member]
+map_size = 128
+max_drafts = 3
+memory_mb = 64
+datastore_mb = 16
+
+[ranks.moderator]
+map_size = 256
+max_drafts = 6
+memory_mb = 96
+datastore_mb = 32
+moderator = true
+
+[ranks.admin]
+map_size = 512
+max_drafts = 12
+memory_mb = 128
+datastore_mb = 64
+moderator = true
+admin = true
+
+[spawn]
+x = 0.5
+y = 65.0
+z = 0.5
+void_y = 0.0
+
+[threads]
+tokio_workers = 1
+compute = 1
+async_compute = 1
+io = 1
+
+[[npc]]
+label = ["§e§lGame Browser", "§7Click to play"]
+pos = [3.5, 65.0, 0.5]
+yaw = 90.0
+opens = "browser"

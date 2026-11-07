@@ -1,0 +1,226 @@
+# The whole Minimodes stack for end-to-end tests: Postgres, Gate, the lobby,
+# two shards, Caddy, an S3 stand-in with the backup tooling, Prometheus and
+# Grafana. Run it with ./e2e.sh, or by hand from this directory:
+#   docker compose up -d --build        (or: podman compose up -d --build)
+#
+# Podman notes: images are fully qualified, healthchecks live here and not in
+# the Dockerfiles, host ports are all above 1024, bind mounts carry :z, and the
+# fixed subnet below gives every container the IP its config names (the
+# servers take socket addresses, not hostnames).
+
+name: minimodes
+
+x-secrets: &secrets
+  MINIMODES_VELOCITY_SECRET: ${MM_SECRET:-e2e-secret}
+  MINIMODES_DATABASE_URL: postgres://minimodes@10.77.0.2:5432/minimodes
+
+x-server: &server
+  restart: on-failure
+  environment:
+    <<: *secrets
+    RUST_LOG: ${RUST_LOG:-info}
+
+services:
+  postgres:
+    image: docker.io/library/postgres:18-alpine3.24
+    container_name: mm-postgres
+    command: ["postgres", "-c", "max_connections=40", "-c", "shared_buffers=128MB"]
+    environment:
+      POSTGRES_USER: minimodes
+      POSTGRES_DB: minimodes
+      # Trust inside the private network, like peer auth on the real host.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U minimodes -d minimodes"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks:
+      mm: { ipv4_address: 10.77.0.2 }
+
+  lobby:
+    <<: *server
+    image: localhost/minimodes/lobby:e2e
+    container_name: mm-lobby
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: lobby
+    depends_on:
+      postgres: { condition: service_healthy }
+    volumes:
+      - ./config/lobby.toml:/etc/minimodes/lobby.toml:ro,z
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://10.77.0.10:9101/metrics"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    networks:
+      mm: { ipv4_address: 10.77.0.10 }
+
+  gamehost-1:
+    <<: *server
+    image: localhost/minimodes/gamehost:e2e
+    container_name: mm-gamehost-1
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: gamehost
+    depends_on:
+      postgres: { condition: service_healthy }
+      lobby: { condition: service_started }
+      gate: { condition: service_started }
+    volumes:
+      - ./config/gamehost-1.toml:/etc/minimodes/gamehost.toml:ro,z
+      - mmdata:/var/lib/minimodes
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://10.77.0.11:9111/metrics"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    networks:
+      mm: { ipv4_address: 10.77.0.11 }
+
+  gamehost-2:
+    <<: *server
+    image: localhost/minimodes/gamehost:e2e
+    container_name: mm-gamehost-2
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: gamehost
+    depends_on:
+      postgres: { condition: service_healthy }
+      lobby: { condition: service_started }
+      gate: { condition: service_started }
+      gamehost-1: { condition: service_started }
+    volumes:
+      - ./config/gamehost-2.toml:/etc/minimodes/gamehost.toml:ro,z
+      - mmdata:/var/lib/minimodes
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://10.77.0.12:9112/metrics"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    networks:
+      mm: { ipv4_address: 10.77.0.12 }
+
+  gate:
+    image: localhost/minimodes/gate:e2e
+    container_name: mm-gate
+    build:
+      context: .
+      dockerfile: gate.Dockerfile
+    restart: on-failure
+    environment:
+      GATE_VELOCITY_SECRET: ${MM_SECRET:-e2e-secret}
+    volumes:
+      - ./config/gate.yml:/etc/gate/gate.yml:ro,z
+    ports:
+      - "${MM_GATE_PORT:-25565}:25565"
+    networks:
+      mm: { ipv4_address: 10.77.0.20 }
+
+  caddy:
+    image: docker.io/library/caddy:2.11.9-alpine
+    container_name: mm-caddy
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro,z
+    ports:
+      - "${MM_EDITOR_PORT:-8080}:8080"
+    depends_on:
+      lobby: { condition: service_started }
+    networks:
+      mm: { ipv4_address: 10.77.0.30 }
+
+  prometheus:
+    image: docker.io/prom/prometheus:v3.16.0
+    container_name: mm-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
+      - ../prometheus/minimodes-alerts.yml:/etc/prometheus/minimodes-alerts.yml:ro,z
+    ports:
+      - "${MM_PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      mm: { ipv4_address: 10.77.0.40 }
+
+  grafana:
+    image: docker.io/grafana/grafana:13.3.0
+    container_name: mm-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./config/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro,z
+      - ../grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro,z
+      - ../grafana/dashboards:/var/lib/grafana/dashboards/minimodes:ro,z
+    ports:
+      - "${MM_GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus: { condition: service_started }
+    networks:
+      mm: { ipv4_address: 10.77.0.41 }
+
+  # Stands in for OCI Object Storage (MinIO's image is gone).
+  objectstore:
+    image: localhost/minimodes/backup:e2e
+    container_name: mm-objectstore
+    build:
+      context: ../..
+      dockerfile: deploy/docker/backup.Dockerfile
+    command: ["rclone", "serve", "s3", "/var/lib/minimodes/s3", "--addr", ":9000", "--auth-key", "minimodes,minimodes-secret"]
+    volumes:
+      - s3data:/var/lib/minimodes/s3
+    networks:
+      mm: { ipv4_address: 10.77.0.50 }
+
+  # Idle; e2e.sh runs the backup and restore scripts in it.
+  backup:
+    image: localhost/minimodes/backup:e2e
+    container_name: mm-backup
+    build:
+      context: ../..
+      dockerfile: deploy/docker/backup.Dockerfile
+    command: ["tail", "-f", "/dev/null"]
+    environment:
+      MINIMODES_BACKUP_DATABASE: postgres://minimodes@10.77.0.2:5432/minimodes
+      MINIMODES_DATA_DIR: /var/lib/minimodes
+      RCLONE_CONFIG: /etc/minimodes/rclone.conf
+    volumes:
+      - ./config/rclone.conf:/etc/minimodes/rclone.conf:ro,z
+      - mmdata:/var/lib/minimodes
+    depends_on:
+      postgres: { condition: service_healthy }
+      objectstore: { condition: service_started }
+    networks:
+      mm: { ipv4_address: 10.77.0.60 }
+
+  # Idle; e2e.sh runs the bot scenarios in it.
+  mmbot:
+    image: localhost/minimodes/mmbot:e2e
+    container_name: mm-bot
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: mmbot
+    entrypoint: ["tail", "-f", "/dev/null"]
+    environment: *secrets
+    networks:
+      mm: { ipv4_address: 10.77.0.70 }
+
+volumes:
+  pgdata:
+  mmdata:
+  s3data:
+
+networks:
+  mm:
+    ipam:
+      config:
+        - subnet: 10.77.0.0/24

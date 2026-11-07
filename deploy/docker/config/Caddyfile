@@ -1,0 +1,18 @@
+# The production Caddyfile (deploy/caddy/Caddyfile) without TLS or a file log:
+# plain HTTP on :8080 and logs on stdout.
+{
+	auto_https off
+}
+
+:8080 {
+	encode zstd gzip
+	reverse_proxy lobby:8081
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+	log {
+		output stdout
+	}
+}

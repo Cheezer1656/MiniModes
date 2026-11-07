@@ -1,0 +1,6 @@
+.git
+target
+dist
+data
+**/*.log
+deploy/docker/.env

@@ -1,0 +1,32 @@
+# Gate for the container stack: offline mode so mmbot can join. Never deploy this.
+# Same shape as deploy/gate/config.yml; addresses are on the compose network.
+config:
+  bind: 0.0.0.0:25565
+  onlineMode: false
+  servers:
+    lobby: 10.77.0.10:25600
+  try:
+    - lobby
+  status:
+    motd: |
+      §6§lMinimodes
+      §7Play and build player-scripted games
+    showMaxPlayers: 1000
+    logPingRequests: false
+  builtinCommands: false
+  announceProxyCommands: false
+  bungeePluginChannelEnabled: false
+  acceptTransfers: false
+  # Secret comes from GATE_VELOCITY_SECRET.
+  forwarding:
+    mode: velocity
+  compression:
+    threshold: 256
+    level: -1
+  connectionTimeout: 5s
+  readTimeout: 30s
+  failoverOnUnexpectedServerDisconnect: true
+
+api:
+  enabled: true
+  bind: 0.0.0.0:8080

@@ -7,7 +7,9 @@
 - configs go to `/etc/minimodes/`;
 - systemd units, including the nightly backup timer, are installed.
 
-Everything below is one-time setup on the host.
+Everything below is one-time setup on the host. To exercise the same pieces
+(real Gate, Caddy, backup and restore, Prometheus, Grafana) in containers
+before touching the host, see `deploy/docker/README.md`.
 
 ## Base
 
